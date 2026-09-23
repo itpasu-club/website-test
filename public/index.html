@@ -1,0 +1,891 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>IT模擬試験</title>
+  <!-- 1.1 XSS対策用 DOMPurify CDN & Chart.js -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.6/purify.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    :root {
+      --primary-color: #0066cc;
+      --success-color: #28a745;
+      --danger-color: #dc3545;
+      --warning-color: #ffc107;
+      --gray-bg: #f8f9fa;
+      --border-color: #dee2e6;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background-color: #f4f6f9;
+      margin: 0;
+      padding: 20px;
+      color: #333;
+    }
+
+    .container {
+      max-width: 1000px;
+      margin: 0 auto;
+      background: #fff;
+      border-radius: 10px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+      padding: 25px;
+    }
+
+    .form-group { margin: 15px 0; text-align: left; }
+    .form-group label { display: block; font-weight: bold; margin-bottom: 5px; }
+
+    .input-box, .select-box {
+      font-size: 1rem;
+      padding: 10px 15px;
+      border-radius: 6px;
+      border: 1px solid var(--border-color);
+      width: 100%;
+      max-width: 320px;
+      box-sizing: border-box;
+    }
+
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 2px solid var(--border-color);
+      padding-bottom: 15px;
+      margin-bottom: 20px;
+    }
+
+    .timer-badge {
+      font-size: 1.2rem;
+      font-weight: bold;
+      background: #fff3cd;
+      color: #856404;
+      padding: 6px 16px;
+      border-radius: 20px;
+      border: 1px solid #ffeeba;
+    }
+
+    .timer-badge.warning {
+      background: #f8d7da;
+      color: var(--danger-color);
+      border-color: #f5c6cb;
+      animation: pulse 1s infinite;
+    }
+
+    @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
+
+    .category-badge {
+      display: inline-block;
+      background: #e6f0ff;
+      color: var(--primary-color);
+      padding: 4px 10px;
+      border-radius: 4px;
+      font-size: 0.85rem;
+      font-weight: bold;
+      margin-bottom: 8px;
+    }
+
+    .progress-bar-container {
+      width: 100%;
+      background-color: var(--border-color);
+      height: 10px;
+      border-radius: 5px;
+      margin-bottom: 25px;
+      overflow: hidden;
+    }
+
+    .progress-bar {
+      height: 100%;
+      background-color: var(--primary-color);
+      width: 0%;
+      transition: width 0.3s ease;
+    }
+
+    .quiz-layout {
+      display: grid;
+      grid-template-columns: 1fr 280px;
+      gap: 25px;
+    }
+
+    @media (max-width: 768px) { .quiz-layout { grid-template-columns: 1fr; } }
+
+    .question-card {
+      background: var(--gray-bg);
+      padding: 20px;
+      border-radius: 8px;
+      border: 1px solid var(--border-color);
+    }
+
+    .question-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 10px;
+    }
+
+    .review-checkbox-label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.9rem;
+      font-weight: bold;
+      color: #856404;
+      background: #fff3cd;
+      padding: 4px 10px;
+      border-radius: 20px;
+      border: 1px solid #ffeeba;
+      cursor: pointer;
+    }
+
+    .question-title {
+      font-size: 1.1rem;
+      margin-bottom: 20px;
+      line-height: 1.6;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .question-title pre {
+      background-color: #282c34;
+      color: #abb2bf;
+      padding: 14px 16px;
+      border-radius: 6px;
+      font-family: monospace;
+      overflow-x: auto;
+      white-space: pre;
+    }
+
+    .question-image-container { margin: 15px 0; text-align: center; }
+    .question-image { max-width: 100%; max-height: 400px; border-radius: 6px; border: 1px solid var(--border-color); }
+
+    .option-list { display: flex; flex-direction: column; gap: 12px; }
+
+    .option-item {
+      display: flex;
+      align-items: center;
+      background: #fff;
+      padding: 12px 15px;
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      cursor: pointer;
+    }
+
+    .option-item:hover { border-color: var(--primary-color); background-color: #f0f7ff; }
+    .option-item input[type="radio"] { margin-right: 12px; transform: scale(1.2); }
+
+    .controls { display: flex; justify-content: space-between; margin-top: 25px; }
+
+    .btn {
+      padding: 10px 20px;
+      font-size: 0.95rem;
+      font-weight: bold;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+
+    .btn-secondary { background: #6c757d; color: #fff; }
+    .btn-primary { background: var(--primary-color); color: #fff; }
+    .btn-submit { background: var(--success-color); color: #fff; }
+    .btn-outline { background: transparent; border: 2px solid var(--primary-color); color: var(--primary-color); }
+
+    .nav-panel {
+      background: var(--gray-bg);
+      padding: 15px;
+      border-radius: 8px;
+      border: 1px solid var(--border-color);
+    }
+
+    .grid-container { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; max-height: 400px; overflow-y: auto; }
+
+    .q-btn {
+      aspect-ratio: 1;
+      border: 1px solid var(--border-color);
+      background: #fff;
+      border-radius: 4px;
+      font-size: 0.8rem;
+      cursor: pointer;
+      font-weight: bold;
+    }
+
+    .q-btn.answered { background-color: var(--success-color); color: #fff; }
+    .q-btn.review { background-color: var(--warning-color); color: #212529; }
+    .q-btn.answered.review { background: linear-gradient(135deg, var(--success-color) 50%, var(--warning-color) 50%); color: #fff; }
+    .q-btn.current { border: 2.5px solid var(--primary-color) !important; }
+
+    .auth-card {
+      max-width: 400px;
+      margin: 40px auto;
+      padding: 30px;
+      background: #fff;
+      border-radius: 8px;
+      border: 1px solid var(--border-color);
+      box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+    }
+
+    #quiz-screen, #result-screen, #history-screen, #resume-banner { display: none; }
+
+    .alert-banner {
+      background: #e2f0ff;
+      border: 1px solid #b8daff;
+      color: #004085;
+      padding: 15px;
+      border-radius: 6px;
+      margin-bottom: 20px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .score-badge { font-size: 3.5rem; color: var(--primary-color); font-weight: bold; margin: 15px 0; }
+    .history-table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+    .history-table th, .history-table td { padding: 10px; border: 1px solid var(--border-color); text-align: center; }
+    .history-table th { background: var(--gray-bg); }
+    .chart-container { position: relative; height: 300px; margin: 20px 0; }
+  </style>
+</head>
+<body>
+
+  <div class="container">
+    
+    <!-- 1.2 ログイン/会員登録画面 -->
+    <div id="auth-screen">
+      <div class="auth-card">
+        <h2 id="auth-title" style="text-align: center;">ログイン</h2>
+        <div class="form-group">
+          <label>ユーザー名 (英数字 3〜20文字)</label>
+          <input type="text" id="auth-username" class="input-box" style="max-width: 100%;">
+        </div>
+        <div class="form-group">
+          <label>パスワード (6文字以上)</label>
+          <input type="password" id="auth-password" class="input-box" style="max-width: 100%;">
+        </div>
+        <div style="margin-top: 20px; display: flex; flex-direction: column; gap: 10px;">
+          <button class="btn btn-primary" id="auth-submit-btn" onclick="handleAuth()">ログイン</button>
+          <button class="btn btn-outline" id="auth-toggle-btn" onclick="toggleAuthMode()">新規会員登録はこちら</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 2. スタート画面 (ログイン後) -->
+    <div id="start-screen" style="display: none; text-align: center; padding: 20px 0;">
+      <!-- 2.3 解答復元通知バナー -->
+      <div id="resume-banner" class="alert-banner">
+        <span>⚠️ 前回の未完了の解答データが残っています。</span>
+        <div>
+          <button class="btn btn-primary" onclick="restoreExamState()">中断した試験を再開</button>
+          <button class="btn btn-secondary" onclick="clearExamState()">破棄</button>
+        </div>
+      </div>
+
+      <h1>IT模擬試験</h1>
+      <p>ログインユーザー: <strong id="current-user-display"></strong> 
+        <a href="#" onclick="logout()" style="margin-left:10px; font-size:0.85rem; color:var(--danger-color);">ログアウト</a>
+      </p>
+
+      <div style="max-width: 400px; margin: 0 auto;">
+        <div class="form-group">
+          <label for="category-select">■ 出題分野</label>
+          <select id="category-select" class="select-box" style="max-width: 100%;">
+            <option value="all">全分野（ランダム出題）</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label for="count-select">■ 出題数</label>
+          <select id="count-select" class="select-box" style="max-width: 100%;">
+            <option value="10" selected>10問</option>
+            <option value="20">20問</option>
+            <option value="30">30問</option>
+            <option value="50">50問</option>
+            <option value="100">100問 (ストラテジ30/マネジメント20/テクノロジ50)</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label for="timer-select">■ 制限時間</label>
+          <select id="timer-select" class="select-box" style="max-width: 100%;">
+            <option value="0">制限時間なし</option>
+            <option value="300">5分</option>
+            <option value="600" selected>10分</option>
+            <option value="1800">30分</option>
+            <option value="3600">60分</option>
+          </select>
+        </div>
+      </div>
+
+      <div style="margin-top: 30px; display: flex; justify-content: center; gap: 15px;">
+        <button class="btn btn-primary" onclick="startQuiz()">試験を開始する</button>
+        <button class="btn btn-outline" onclick="showHistory()">📊 過去の成績を見る</button>
+      </div>
+    </div>
+
+    <!-- 3. 試験実施画面 -->
+    <div id="quiz-screen">
+      <div class="header">
+        <div>
+          <h2>IT 模擬試験 (<span id="display-user-id"></span>)</h2>
+          <div>進捗: <span id="answered-count">0</span> / <span id="total-count">0</span> 問</div>
+        </div>
+        <div style="display: flex; align-items: center; gap: 15px;">
+          <div id="timer-display" class="timer-badge">残り時間: --:--</div>
+          <button class="btn btn-secondary" onclick="abortQuiz()">✕ 中断して戻る</button>
+        </div>
+      </div>
+
+      <div class="progress-bar-container">
+        <div class="progress-bar" id="progress-bar"></div>
+      </div>
+
+      <div class="quiz-layout">
+        <div>
+          <div class="question-card">
+            <div class="question-header">
+              <span class="category-badge" id="q-category">分野</span>
+              <label class="review-checkbox-label">
+                <input type="checkbox" id="review-checkbox" onchange="toggleReviewFlag()"> 🔖 あとで見直す
+              </label>
+            </div>
+            <div class="question-title" id="q-title">問題を読み込み中...</div>
+            <div class="option-list" id="q-options"></div>
+          </div>
+
+          <div class="controls">
+            <button class="btn btn-secondary" id="prev-btn" onclick="moveQuestion(-1)">← 前へ</button>
+            <button class="btn btn-primary" id="next-btn" onclick="moveQuestion(1)">次へ →</button>
+            <button class="btn btn-submit" id="submit-btn" onclick="confirmSubmit()">テストを提出</button>
+          </div>
+        </div>
+
+        <div class="nav-panel">
+          <h3>問題一覧</h3>
+          <div class="grid-container" id="grid-container"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 4. 結果表示画面 -->
+    <div id="result-screen" style="text-align: center; padding: 20px 0;">
+      <h1>採点完了</h1>
+      <p><strong id="result-user-id"></strong> さんの獲得スコア</p>
+      
+      <div class="score-badge">
+        <span id="score-val">0</span> / <span id="max-score-val">1000</span>点
+      </div>
+      
+      <p>正解数: <span id="correct-val">0</span> / <span id="total-val">0</span> 問</p>
+
+      <div style="margin-top: 30px; display: flex; justify-content: center; gap: 15px;">
+        <button class="btn btn-primary" onclick="backToStart()">トップ画面に戻る</button>
+        <button class="btn btn-outline" onclick="showHistory()">📊 成績履歴を見る</button>
+      </div>
+    </div>
+
+    <!-- 5. 成績履歴画面 -->
+    <div id="history-screen">
+      <h2>📊 <span id="history-user-id"></span> さんの成績履歴</h2>
+      
+      <div class="chart-container">
+        <canvas id="historyChart"></canvas>
+      </div>
+
+      <h3>履歴一覧</h3>
+      <table class="history-table">
+        <thead>
+          <tr>
+            <th>日時</th>
+            <th>分野</th>
+            <th>正解数</th>
+            <th>スコア</th>
+          </tr>
+        </thead>
+        <tbody id="history-table-body"></tbody>
+      </table>
+
+      <div style="margin-top: 25px; text-align: center;">
+        <button class="btn btn-secondary" onclick="backToStart()">トップ画面に戻る</button>
+      </div>
+    </div>
+
+  </div>
+
+  <script>
+    let authToken = localStorage.getItem('auth_token') || '';
+    let currentUsername = '';
+    let isAuthRegisterMode = false;
+
+    let questions = [];
+    let userAnswers = {};
+    let reviewFlags = {};
+    let currentIndex = 0;
+    let timerInterval = null;
+    let remainingSeconds = 0;
+    let selectedCategory = 'all';
+    let chartInstance = null;
+
+    // 1.1 DOMPurifyによるHTMLサニタイズ関数 (XSS防止)
+    function sanitizeHtml(dirty) {
+      if (typeof DOMPurify !== 'undefined') {
+        return DOMPurify.sanitize(dirty, {
+          ADD_TAGS: ['pre', 'code', 'img'],
+          ADD_ATTR: ['src', 'alt', 'class', 'style']
+        });
+      }
+      const div = document.createElement('div');
+      div.textContent = dirty;
+      return div.innerHTML;
+    }
+
+    // 1.2 認証ヘッダー付きFetch関数
+    async function fetchWithAuth(url, options = {}) {
+      options.headers = options.headers || {};
+      if (authToken) {
+        options.headers['Authorization'] = `Bearer ${authToken}`;
+      }
+      const res = await fetch(url, options);
+      if (res.status === 401 || res.status === 403) {
+        logout();
+        throw new Error("認証エラーが発生しました。再ログインしてください。");
+      }
+      return res;
+    }
+
+    window.onload = async () => {
+      if (authToken) {
+        try {
+          const res = await fetchWithAuth('/api/me');
+          if (res.ok) {
+            const data = await res.json();
+            currentUsername = data.username;
+            showStartScreen();
+            return;
+          }
+        } catch (e) { console.warn("認証チェック失敗"); }
+      }
+      showAuthScreen();
+    };
+
+    // 認証画面切り替え
+    function toggleAuthMode() {
+      isAuthRegisterMode = !isAuthRegisterMode;
+      document.getElementById('auth-title').textContent = isAuthRegisterMode ? "新規会員登録" : "ログイン";
+      document.getElementById('auth-submit-btn').textContent = isAuthRegisterMode ? "登録して開始" : "ログイン";
+      document.getElementById('auth-toggle-btn').textContent = isAuthRegisterMode ? "ログイン画面へ戻る" : "新規会員登録はこちら";
+    }
+
+    async function handleAuth() {
+      const username = document.getElementById('auth-username').value.trim();
+      const password = document.getElementById('auth-password').value;
+
+      if (!username || !password) {
+        alert("ユーザー名とパスワードを入力してください。");
+        return;
+      }
+
+      const endpoint = isAuthRegisterMode ? '/api/register' : '/api/login';
+
+      try {
+        const res = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password })
+        });
+
+        const data = await res.json();
+        if (!res.ok) {
+          alert(data.error || "認証に失敗しました。");
+          return;
+        }
+
+        authToken = data.token;
+        localStorage.setItem('auth_token', authToken);
+        currentUsername = data.username;
+
+        showStartScreen();
+      } catch (err) {
+        alert("通信エラーが発生しました。");
+      }
+    }
+
+    function logout() {
+      authToken = '';
+      currentUsername = '';
+      localStorage.removeItem('auth_token');
+      showAuthScreen();
+    }
+
+    function showAuthScreen() {
+      document.getElementById('auth-screen').style.display = 'block';
+      document.getElementById('start-screen').style.display = 'none';
+      document.getElementById('quiz-screen').style.display = 'none';
+      document.getElementById('result-screen').style.display = 'none';
+      document.getElementById('history-screen').style.display = 'none';
+    }
+
+    async function showStartScreen() {
+      document.getElementById('auth-screen').style.display = 'none';
+      document.getElementById('start-screen').style.display = 'block';
+      document.getElementById('current-user-display').textContent = currentUsername;
+
+      // 2.3 中断データの確認
+      checkSavedExamState();
+
+      try {
+        const res = await fetch('/api/categories');
+        const categories = await res.json();
+
+        const select = document.getElementById('category-select');
+        select.innerHTML = '<option value="all">全分野（ランダム出題）</option>';
+        categories.forEach(cat => {
+          const opt = document.createElement('option');
+          opt.value = cat;
+          opt.textContent = cat;
+          select.appendChild(opt);
+        });
+      } catch (err) {}
+    }
+
+    // 2.3 解答状況のローカル自動保存
+    function saveExamState() {
+      if (questions.length === 0) return;
+      const state = {
+        username: currentUsername,
+        questions, userAnswers, reviewFlags, currentIndex,
+        remainingSeconds, selectedCategory, timestamp: Date.now()
+      };
+      localStorage.setItem(`exam_state_${currentUsername}`, JSON.stringify(state));
+    }
+
+    function checkSavedExamState() {
+      const saved = localStorage.getItem(`exam_state_${currentUsername}`);
+      if (saved) {
+        document.getElementById('resume-banner').style.display = 'flex';
+      } else {
+        document.getElementById('resume-banner').style.display = 'none';
+      }
+    }
+
+    function restoreExamState() {
+      const saved = localStorage.getItem(`exam_state_${currentUsername}`);
+      if (!saved) return;
+
+      const state = JSON.parse(saved);
+      questions = state.questions;
+      userAnswers = state.userAnswers;
+      reviewFlags = state.reviewFlags;
+      currentIndex = state.currentIndex;
+      remainingSeconds = state.remainingSeconds;
+      selectedCategory = state.selectedCategory;
+
+      document.getElementById('start-screen').style.display = 'none';
+      document.getElementById('quiz-screen').style.display = 'block';
+
+      document.getElementById('display-user-id').textContent = currentUsername;
+      document.getElementById('total-count').textContent = questions.length;
+
+      renderNavGrid();
+      showQuestion(currentIndex);
+
+      if (remainingSeconds > 0) startTimer();
+    }
+
+    function clearExamState() {
+      localStorage.removeItem(`exam_state_${currentUsername}`);
+      document.getElementById('resume-banner').style.display = 'none';
+    }
+
+    async function startQuiz() {
+      clearExamState();
+      userAnswers = {};
+      reviewFlags = {};
+      currentIndex = 0;
+      if (timerInterval) clearInterval(timerInterval);
+
+      selectedCategory = document.getElementById('category-select').value;
+      const questionCount = document.getElementById('count-select').value;
+      const timeLimitSec = parseInt(document.getElementById('timer-select').value, 10);
+
+      try {
+        const res = await fetchWithAuth(`/api/questions?category=${encodeURIComponent(selectedCategory)}&limit=${questionCount}`);
+        questions = await res.json();
+
+        if (questions.length === 0) {
+          alert("該当する問題が存在しません。");
+          return;
+        }
+
+        document.getElementById('start-screen').style.display = 'none';
+        document.getElementById('quiz-screen').style.display = 'block';
+
+        document.getElementById('display-user-id').textContent = currentUsername;
+        document.getElementById('total-count').textContent = questions.length;
+
+        renderNavGrid();
+        showQuestion(0);
+
+        if (timeLimitSec > 0) {
+          remainingSeconds = timeLimitSec;
+          startTimer();
+        } else {
+          document.getElementById('timer-display').textContent = '制限時間: なし';
+        }
+
+        saveExamState();
+
+      } catch (err) {
+        alert("問題データの取得に失敗しました。");
+      }
+    }
+
+    function startTimer() {
+      updateTimerDisplay();
+      timerInterval = setInterval(() => {
+        remainingSeconds--;
+        updateTimerDisplay();
+        saveExamState(); // タイマー進行に伴う保存
+
+        if (remainingSeconds <= 0) {
+          clearInterval(timerInterval);
+          alert("⏰ 制限時間になりました！解答を自動提出します。");
+          submitAnswers();
+        }
+      }, 1000);
+    }
+
+    function updateTimerDisplay() {
+      const display = document.getElementById('timer-display');
+      const m = Math.floor(remainingSeconds / 60).toString().padStart(2, '0');
+      const s = (remainingSeconds % 60).toString().padStart(2, '0');
+      display.textContent = `残り時間: ${m}:${s}`;
+      if (remainingSeconds <= 60) display.classList.add('warning');
+      else display.classList.remove('warning');
+    }
+
+    function abortQuiz() {
+      if (confirm("試験を中断しますか？（ここまでの解答状況は保存されます）")) {
+        if (timerInterval) clearInterval(timerInterval);
+        showStartScreen();
+      }
+    }
+
+    function getShuffledOptions(q) {
+      if (!q.shuffledOptions) {
+        const original = [
+          { num: 1, text: q.option1 }, { num: 2, text: q.option2 },
+          { num: 3, text: q.option3 }, { num: 4, text: q.option4 }
+        ];
+        q.shuffledOptions = [...original].sort(() => Math.random() - 0.5);
+      }
+      return q.shuffledOptions;
+    }
+
+    function showQuestion(index) {
+      currentIndex = index;
+      const q = questions[currentIndex];
+
+      document.getElementById('q-category').textContent = q.category || "全般";
+
+      // 1.1 XSS対策用サニタイズ適用
+      let qTitleHtml = `<strong>問 ${currentIndex + 1}.</strong><br>${sanitizeHtml(q.question_text)}`;
+
+      if (q.image_url && q.image_url.trim() !== '') {
+        const safeUrl = sanitizeHtml(q.image_url.trim());
+        qTitleHtml += `
+          <div class="question-image-container">
+            <img src="${safeUrl}" class="question-image" alt="問題画像" onerror="this.style.display='none'">
+          </div>
+        `;
+      }
+
+      document.getElementById('q-title').innerHTML = qTitleHtml;
+      document.getElementById('review-checkbox').checked = !!reviewFlags[q.id];
+
+      const optionsContainer = document.getElementById('q-options');
+      optionsContainer.innerHTML = '';
+
+      const options = getShuffledOptions(q);
+      options.forEach(opt => {
+        const optNum = opt.num;
+        const isChecked = userAnswers[q.id] === optNum ? 'checked' : '';
+
+        // 1.1 選択肢文言のサニタイズ
+        optionsContainer.innerHTML += `
+          <label class="option-item">
+            <input type="radio" name="option" value="${optNum}" ${isChecked} onchange="selectOption(${q.id}, ${optNum})">
+            <span>${sanitizeHtml(opt.text)}</span>
+          </label>
+        `;
+      });
+
+      document.getElementById('prev-btn').style.visibility = (currentIndex === 0) ? 'hidden' : 'visible';
+      document.getElementById('next-btn').style.display = (currentIndex === questions.length - 1) ? 'none' : 'inline-block';
+
+      updateUI();
+    }
+
+    function toggleReviewFlag() {
+      const q = questions[currentIndex];
+      if (!q) return;
+      reviewFlags[q.id] = document.getElementById('review-checkbox').checked;
+      updateUI();
+      saveExamState();
+    }
+
+    function selectOption(qId, optionNum) {
+      userAnswers[qId] = optionNum;
+      updateUI();
+      saveExamState();
+    }
+
+    function moveQuestion(step) {
+      const newIndex = currentIndex + step;
+      if (newIndex >= 0 && newIndex < questions.length) {
+        showQuestion(newIndex);
+      }
+    }
+
+    function updateUI() {
+      const answeredCount = Object.keys(userAnswers).length;
+      document.getElementById('answered-count').textContent = answeredCount;
+      document.getElementById('progress-bar').style.width = `${(answeredCount / questions.length) * 100}%`;
+
+      questions.forEach((q, idx) => {
+        const btn = document.getElementById(`grid-btn-${idx}`);
+        if (!btn) return;
+
+        btn.className = 'q-btn';
+        if (userAnswers[q.id]) btn.classList.add('answered');
+        if (reviewFlags[q.id]) btn.classList.add('review');
+        if (idx === currentIndex) btn.classList.add('current');
+      });
+    }
+
+    function renderNavGrid() {
+      const grid = document.getElementById('grid-container');
+      grid.innerHTML = '';
+      questions.forEach((q, idx) => {
+        const btn = document.createElement('button');
+        btn.id = `grid-btn-${idx}`;
+        btn.className = 'q-btn';
+        btn.textContent = idx + 1;
+        btn.onclick = () => showQuestion(idx);
+        grid.appendChild(btn);
+      });
+    }
+
+    function confirmSubmit() {
+      const answeredCount = Object.keys(userAnswers).length;
+      const unAnsweredCount = questions.length - answeredCount;
+
+      let msg = "解答を送信して採点を行いますか？";
+      if (unAnsweredCount > 0) msg = `未回答の問題が ${unAnsweredCount} 問あります。\n提出しますか？`;
+
+      if (confirm(msg)) {
+        if (timerInterval) clearInterval(timerInterval);
+        submitAnswers();
+      }
+    }
+
+    async function submitAnswers() {
+      try {
+        const questionIds = questions.map(q => q.id);
+
+        const res = await fetchWithAuth('/api/submit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            questionIds, answers: userAnswers, category: selectedCategory
+          })
+        });
+
+        const data = await res.json();
+        if (!res.ok) {
+          alert(data.error || "採点処理エラー");
+          return;
+        }
+
+        clearExamState(); // 成功時に途中経過データを消去
+
+        document.getElementById('quiz-screen').style.display = 'none';
+        document.getElementById('result-user-id').textContent = currentUsername;
+        document.getElementById('score-val').textContent = data.score;
+        document.getElementById('max-score-val').textContent = data.maxScore;
+        document.getElementById('correct-val').textContent = data.correctCount;
+        document.getElementById('total-val').textContent = data.totalCount;
+        document.getElementById('result-screen').style.display = 'block';
+
+      } catch (err) {
+        alert("通信エラーまたは採点に失敗しました。");
+      }
+    }
+
+    async function showHistory() {
+      document.getElementById('start-screen').style.display = 'none';
+      document.getElementById('result-screen').style.display = 'none';
+      document.getElementById('history-screen').style.display = 'block';
+      document.getElementById('history-user-id').textContent = currentUsername;
+
+      try {
+        const res = await fetchWithAuth('/api/history');
+        const history = await res.json();
+
+        const tbody = document.getElementById('history-table-body');
+        tbody.innerHTML = '';
+
+        if (!Array.isArray(history) || history.length === 0) {
+          tbody.innerHTML = `<tr><td colspan="4">受検履歴がありません。</td></tr>`;
+          return;
+        }
+
+        const labels = [];
+        const scores = [];
+
+        history.forEach((row, idx) => {
+          labels.push(`${idx + 1}回目 (${row.date})`);
+          scores.push(row.score);
+
+          tbody.innerHTML += `
+            <tr>
+              <td>${sanitizeHtml(row.date)}</td>
+              <td>${sanitizeHtml(row.category)}</td>
+              <td>${row.correct_count} / ${row.total_count}</td>
+              <td><strong>${row.score}点</strong></td>
+            </tr>
+          `;
+        });
+
+        const ctx = document.getElementById('historyChart').getContext('2d');
+        if (chartInstance) chartInstance.destroy();
+
+        chartInstance = new Chart(ctx, {
+          type: 'line',
+          data: {
+            labels,
+            datasets: [{
+              label: '獲得スコア (1000点満点)',
+              data: scores,
+              borderColor: '#0066cc',
+              backgroundColor: 'rgba(0, 102, 204, 0.1)',
+              fill: true,
+              tension: 0.2
+            }]
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            scales: { y: { min: 0, max: 1000 } }
+          }
+        });
+
+      } catch (err) {}
+    }
+
+    function backToStart() {
+      document.getElementById('result-screen').style.display = 'none';
+      document.getElementById('history-screen').style.display = 'none';
+      showStartScreen();
+    }
+  </script>
+</body>
+</html>
