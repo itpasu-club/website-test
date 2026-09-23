@@ -1,6 +1,4 @@
-require('dotenv').config(); // 1行目に追加
-// ... 以降のコード
-// server.js (Supabase PostgreSQL + Render 対応版)
+require('dotenv').config();
 const express = require('express');
 const { Pool } = require('pg');
 const path = require('path');
@@ -10,6 +8,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 
 const app = express();
+app.set('trust proxy', 1); // Render環境でのレート制限（express-rate-limit）用設定
 
 // --- 構造化ロガー ---
 const logger = {
