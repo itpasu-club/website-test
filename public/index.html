@@ -243,6 +243,43 @@
     .history-table th, .history-table td { padding: 10px; border: 1px solid var(--border-color); text-align: center; }
     .history-table th { background: var(--gray-bg); }
     .chart-container { position: relative; height: 300px; margin: 20px 0; }
+
+    /* 採点結果の復習エリア用スタイル */
+    .review-section { margin-top: 35px; text-align: left; }
+    .review-card {
+      background: #fff;
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 18px;
+      margin-bottom: 20px;
+      box-shadow: 0 2px 5px rgba(0,0,0,0.03);
+    }
+    .review-card.correct-card { border-left: 6px solid var(--success-color); }
+    .review-card.incorrect-card { border-left: 6px solid var(--danger-color); }
+    .review-card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+      font-weight: bold;
+    }
+    .status-badge {
+      padding: 4px 12px;
+      border-radius: 20px;
+      font-weight: bold;
+      font-size: 0.85rem;
+    }
+    .status-badge.correct { background: #d4edda; color: #155724; }
+    .status-badge.incorrect { background: #f8d7da; color: #721c24; }
+    .explanation-box {
+      background: #eef7ff;
+      border-left: 4px solid var(--primary-color);
+      padding: 12px 15px;
+      margin-top: 12px;
+      border-radius: 4px;
+      font-size: 0.95rem;
+      line-height: 1.6;
+    }
   </style>
 </head>
 <body>
@@ -375,6 +412,12 @@
       </div>
       
       <p>正解数: <span id="correct-val">0</span> / <span id="total-val">0</span> 問</p>
+
+      <!-- 採点結果・復習エリア -->
+      <div id="review-section" class="review-section">
+        <h3 style="border-bottom: 2px solid var(--primary-color); padding-bottom: 8px; margin-bottom: 20px;">問題の振り返り・解説</h3>
+        <div id="review-list"></div>
+      </div>
 
       <div style="margin-top: 30px; display: flex; justify-content: center; gap: 15px;">
         <button class="btn btn-primary" onclick="backToStart()">トップ画面に戻る</button>
@@ -813,6 +856,57 @@
         document.getElementById('max-score-val').textContent = data.maxScore;
         document.getElementById('correct-val').textContent = data.correctCount;
         document.getElementById('total-val').textContent = data.totalCount;
+
+        // --- 採点結果・復習・解説エリアの描画処理 ---
+        const reviewList = document.getElementById('review-list');
+        reviewList.innerHTML = '';
+
+        if (data.details && Array.isArray(data.details)) {
+          data.details.forEach((item, index) => {
+            const isCorrect = item.isCorrect ?? item.is_correct;
+            const userAnswer = item.userAnswer ?? item.user_answer;
+            const correctOption = item.correctOption ?? item.correct_option;
+            const explanation = item.explanation || '';
+            const questionText = item.questionText || item.question_text || '';
+
+            const options = [item.option1, item.option2, item.option3, item.option4];
+
+            const userOptionText = (userAnswer && options[userAnswer - 1]) ? options[userAnswer - 1] : '未回答';
+            const correctOptionText = (correctOption && options[correctOption - 1]) ? options[correctOption - 1] : '';
+
+            const card = document.createElement('div');
+            card.className = `review-card ${isCorrect ? 'correct-card' : 'incorrect-card'}`;
+
+            card.innerHTML = `
+              <div class="review-card-header">
+                <span>問 ${index + 1}</span>
+                <span class="status-badge ${isCorrect ? 'correct' : 'incorrect'}">
+                  ${isCorrect ? '⭕️ 正解' : '❌ 不正解'}
+                </span>
+              </div>
+              <div style="font-weight: bold; margin-bottom: 12px; font-size: 1.05rem;">
+                ${sanitizeHtml(questionText)}
+              </div>
+              <div style="font-size: 0.95rem; margin-bottom: 6px;">
+                あなたの回答: <span style="color: ${isCorrect ? 'var(--success-color)' : 'var(--danger-color)'}; font-weight: bold;">${sanitizeHtml(userOptionText)}</span>
+              </div>
+              ${!isCorrect ? `
+                <div style="font-size: 0.95rem; margin-bottom: 6px;">
+                  正解: <span style="color: var(--success-color); font-weight: bold;">${sanitizeHtml(correctOptionText)}</span>
+                </div>
+              ` : ''}
+              ${explanation ? `
+                <div class="explanation-box">
+                  <strong>💡 解説:</strong><br>
+                  ${sanitizeHtml(explanation)}
+                </div>
+              ` : ''}
+            `;
+
+            reviewList.appendChild(card);
+          });
+        }
+
         document.getElementById('result-screen').style.display = 'block';
 
       } catch (err) {
