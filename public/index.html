@@ -224,7 +224,10 @@
       box-shadow: 0 2px 8px rgba(0,0,0,0.05);
     }
 
-    #quiz-screen, #result-screen, #history-screen, #resume-banner { display: none; }
+    /* 全画面デフォルト非表示 */
+    #auth-screen, #start-screen, #quiz-screen, #result-screen, #history-screen, #resume-banner {
+      display: none;
+    }
 
     .alert-banner {
       background: #e2f0ff;
@@ -286,7 +289,7 @@
 
   <div class="container">
     
-    <!-- 1.2 ログイン/会員登録画面 -->
+    <!-- 1. ログイン/会員登録画面 -->
     <div id="auth-screen">
       <div class="auth-card">
         <h2 id="auth-title" style="text-align: center;">ログイン</h2>
@@ -306,8 +309,8 @@
     </div>
 
     <!-- 2. スタート画面 (ログイン後) -->
-    <div id="start-screen" style="display: none; text-align: center; padding: 20px 0;">
-      <!-- 2.3 解答復元通知バナー -->
+    <div id="start-screen" style="text-align: center; padding: 20px 0;">
+      <!-- 解答復元通知バナー -->
       <div id="resume-banner" class="alert-banner">
         <span>⚠️ 前回の未完了の解答データが残っています。</span>
         <div>
@@ -467,7 +470,18 @@
     let selectedCategory = 'all';
     let chartInstance = null;
 
-    // 1.1 DOMPurifyによるHTMLサニタイズ関数 (XSS防止)
+    // ★ 画面一括切り替え関数 (指定された画面のみ表示し、他は非表示)
+    function switchScreen(activeScreenId) {
+      const screens = ['auth-screen', 'start-screen', 'quiz-screen', 'result-screen', 'history-screen'];
+      screens.forEach(id => {
+        const el = document.getElementById(id);
+        if (el) {
+          el.style.display = (id === activeScreenId) ? 'block' : 'none';
+        }
+      });
+    }
+
+    // XSS対策用サニタイズ関数
     function sanitizeHtml(dirty) {
       if (typeof DOMPurify !== 'undefined') {
         return DOMPurify.sanitize(dirty, {
@@ -480,7 +494,7 @@
       return div.innerHTML;
     }
 
-    // 1.2 認証ヘッダー付きFetch関数
+    // 認証ヘッダー付きFetch関数
     async function fetchWithAuth(url, options = {}) {
       options.headers = options.headers || {};
       if (authToken) {
@@ -509,7 +523,6 @@
       showAuthScreen();
     };
 
-    // 認証画面切り替え
     function toggleAuthMode() {
       isAuthRegisterMode = !isAuthRegisterMode;
       document.getElementById('auth-title').textContent = isAuthRegisterMode ? "新規会員登録" : "ログイン";
@@ -559,19 +572,13 @@
     }
 
     function showAuthScreen() {
-      document.getElementById('auth-screen').style.display = 'block';
-      document.getElementById('start-screen').style.display = 'none';
-      document.getElementById('quiz-screen').style.display = 'none';
-      document.getElementById('result-screen').style.display = 'none';
-      document.getElementById('history-screen').style.display = 'none';
+      switchScreen('auth-screen');
     }
 
     async function showStartScreen() {
-      document.getElementById('auth-screen').style.display = 'none';
-      document.getElementById('start-screen').style.display = 'block';
+      switchScreen('start-screen');
       document.getElementById('current-user-display').textContent = currentUsername;
 
-      // 2.3 中断データの確認
       checkSavedExamState();
 
       try {
@@ -589,7 +596,6 @@
       } catch (err) {}
     }
 
-    // 2.3 解答状況のローカル自動保存
     function saveExamState() {
       if (questions.length === 0) return;
       const state = {
@@ -621,8 +627,7 @@
       remainingSeconds = state.remainingSeconds;
       selectedCategory = state.selectedCategory;
 
-      document.getElementById('start-screen').style.display = 'none';
-      document.getElementById('quiz-screen').style.display = 'block';
+      switchScreen('quiz-screen');
 
       document.getElementById('display-user-id').textContent = currentUsername;
       document.getElementById('total-count').textContent = questions.length;
@@ -658,8 +663,7 @@
           return;
         }
 
-        document.getElementById('start-screen').style.display = 'none';
-        document.getElementById('quiz-screen').style.display = 'block';
+        switchScreen('quiz-screen');
 
         document.getElementById('display-user-id').textContent = currentUsername;
         document.getElementById('total-count').textContent = questions.length;
@@ -686,7 +690,7 @@
       timerInterval = setInterval(() => {
         remainingSeconds--;
         updateTimerDisplay();
-        saveExamState(); // タイマー進行に伴う保存
+        saveExamState();
 
         if (remainingSeconds <= 0) {
           clearInterval(timerInterval);
@@ -708,7 +712,7 @@
     function abortQuiz() {
       if (confirm("試験を中断しますか？（ここまでの解答状況は保存されます）")) {
         if (timerInterval) clearInterval(timerInterval);
-        showStartScreen();
+        showStartScreen(); // switchScreen('start-screen') が呼ばれ試験画面が確実に隠れます
       }
     }
 
@@ -729,7 +733,6 @@
 
       document.getElementById('q-category').textContent = q.category || "全般";
 
-      // 1.1 XSS対策用サニタイズ適用
       let qTitleHtml = `<strong>問 ${currentIndex + 1}.</strong><br>${sanitizeHtml(q.question_text)}`;
 
       if (q.image_url && q.image_url.trim() !== '') {
@@ -752,7 +755,6 @@
         const optNum = opt.num;
         const isChecked = userAnswers[q.id] === optNum ? 'checked' : '';
 
-        // 1.1 選択肢文言のサニタイズ
         optionsContainer.innerHTML += `
           <label class="option-item">
             <input type="radio" name="option" value="${optNum}" ${isChecked} onchange="selectOption(${q.id}, ${optNum})">
@@ -848,16 +850,15 @@
           return;
         }
 
-        clearExamState(); // 成功時に途中経過データを消去
+        clearExamState();
 
-        document.getElementById('quiz-screen').style.display = 'none';
+        switchScreen('result-screen');
         document.getElementById('result-user-id').textContent = currentUsername;
         document.getElementById('score-val').textContent = data.score;
         document.getElementById('max-score-val').textContent = data.maxScore;
         document.getElementById('correct-val').textContent = data.correctCount;
         document.getElementById('total-val').textContent = data.totalCount;
 
-        // --- 採点結果・復習・解説エリアの描画処理 ---
         const reviewList = document.getElementById('review-list');
         reviewList.innerHTML = '';
 
@@ -907,17 +908,13 @@
           });
         }
 
-        document.getElementById('result-screen').style.display = 'block';
-
       } catch (err) {
         alert("通信エラーまたは採点に失敗しました。");
       }
     }
 
     async function showHistory() {
-      document.getElementById('start-screen').style.display = 'none';
-      document.getElementById('result-screen').style.display = 'none';
-      document.getElementById('history-screen').style.display = 'block';
+      switchScreen('history-screen');
       document.getElementById('history-user-id').textContent = currentUsername;
 
       try {
@@ -976,8 +973,6 @@
     }
 
     function backToStart() {
-      document.getElementById('result-screen').style.display = 'none';
-      document.getElementById('history-screen').style.display = 'none';
       showStartScreen();
     }
   </script>
