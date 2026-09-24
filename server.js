@@ -255,7 +255,6 @@ app.post('/api/submit', strictLimiter, authenticateToken, async (req, res) => {
 
     await client.query('BEGIN');
 
-    // ★ プレースホルダーのインデックスずれを修正 ($2 以降から開始)
     const userAnswersPlaceholders = validQuestionIds.map((_, i) => `$${i + 2}`).join(',');
     const answeredRes = await client.query(`
       SELECT question_id FROM user_answers 
@@ -283,7 +282,8 @@ app.post('/api/submit', strictLimiter, authenticateToken, async (req, res) => {
         const currentAnswerCount = (q.answer_count || 0) + 1;
         const currentCorrectCount = (q.correct_count || 0) + isCorrect;
 
-        if (currentAnswerCount > 20) {
+        // ★ 初見解答数が10回を超えたら（11回目以降）難易度を自動更新
+        if (currentAnswerCount > 10) {
           const p = (currentCorrectCount + 1) / (currentAnswerCount + 2);
           const pAdjusted = Math.max(0.01, (p - 0.25) / (1 - 0.25));
           let newDifficulty = -Math.log(pAdjusted / (1 - pAdjusted)) / 1.7;
