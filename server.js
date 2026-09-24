@@ -155,10 +155,22 @@ app.get('/api/me', authenticateToken, (req, res) => {
 
 // ==================== 試験 API ====================
 
+// カテゴリキャッシュ（5分間保持）
+let categoryCache = null;
+let categoryCacheTime = 0;
+
 app.get('/api/categories', async (req, res) => {
   try {
+    const now = Date.now();
+    if (categoryCache && (now - categoryCacheTime < 5 * 60 * 1000)) {
+      return res.json(categoryCache);
+    }
+
     const result = await pool.query("SELECT DISTINCT category FROM questions WHERE category IS NOT NULL AND category != ''");
-    res.json(result.rows.map(c => c.category));
+    categoryCache = result.rows.map(c => c.category);
+    categoryCacheTime = now;
+
+    res.json(categoryCache);
   } catch (err) {
     logger.error("カテゴリ取得エラー", { error: err.message });
     res.status(500).json({ error: "カテゴリの取得に失敗しました。" });
@@ -228,7 +240,7 @@ app.get('/api/questions', async (req, res) => {
   }
 });
 
-// 解答送信 & 採点
+// 解答送信 & 採点 (一括バルク更新適用で超高速化)
 app.post('/api/submit', strictLimiter, authenticateToken, async (req, res) => {
   const client = await pool.connect();
   try {
@@ -267,6 +279,10 @@ app.post('/api/submit', strictLimiter, authenticateToken, async (req, res) => {
     let correctCount = 0;
     const details = [];
 
+    // バルク処理用配列
+    const updateQuestions = []; // { id, answer_count, correct_count, difficulty }
+    const insertUserAnswers = []; // question_id
+
     for (const q of allQuestions) {
       const userAnswer = userAnswers[q.id];
       const isCorrect = (userAnswer !== undefined && Number(userAnswer) === Number(q.correct_option)) ? 1 : 0;
@@ -277,33 +293,26 @@ app.post('/api/submit', strictLimiter, authenticateToken, async (req, res) => {
 
       const isFirstTime = !answeredSet.has(q.id);
 
-      // 初見解答の場合のみ問題側の難易度・解答数を更新
       if (isFirstTime) {
         const currentAnswerCount = (q.answer_count || 0) + 1;
         const currentCorrectCount = (q.correct_count || 0) + isCorrect;
+        let newDifficulty = q.difficulty || 0.0;
 
-        // ★ 初見解答数が10回を超えたら（11回目以降）難易度を自動更新
         if (currentAnswerCount > 10) {
           const p = (currentCorrectCount + 1) / (currentAnswerCount + 2);
           const pAdjusted = Math.max(0.01, (p - 0.25) / (1 - 0.25));
-          let newDifficulty = -Math.log(pAdjusted / (1 - pAdjusted)) / 1.7;
+          newDifficulty = -Math.log(pAdjusted / (1 - pAdjusted)) / 1.7;
           newDifficulty = Math.max(-3.0, Math.min(3.0, newDifficulty));
-
-          await client.query(
-            `UPDATE questions SET answer_count = $1, correct_count = $2, difficulty = $3 WHERE id = $4`,
-            [currentAnswerCount, currentCorrectCount, newDifficulty, q.id]
-          );
-        } else {
-          await client.query(
-            `UPDATE questions SET answer_count = $1, correct_count = $2 WHERE id = $3`,
-            [currentAnswerCount, currentCorrectCount, q.id]
-          );
         }
 
-        await client.query(
-          `INSERT INTO user_answers (user_id, question_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
-          [authUserId, q.id]
-        );
+        updateQuestions.push({
+          id: q.id,
+          answer_count: currentAnswerCount,
+          correct_count: currentCorrectCount,
+          difficulty: newDifficulty
+        });
+
+        insertUserAnswers.push(q.id);
       }
 
       details.push({
@@ -319,6 +328,34 @@ app.post('/api/submit', strictLimiter, authenticateToken, async (req, res) => {
         correctOption: Number(q.correct_option),
         isCorrect: isCorrect === 1
       });
+    }
+
+    // ★ バルク1: questions 一括更新（unnest 使用）
+    if (updateQuestions.length > 0) {
+      const qIds = updateQuestions.map(u => u.id);
+      const qAC = updateQuestions.map(u => u.answer_count);
+      const qCC = updateQuestions.map(u => u.correct_count);
+      const qDiff = updateQuestions.map(u => u.difficulty);
+
+      await client.query(`
+        UPDATE questions AS q
+        SET 
+          answer_count = u.ac,
+          correct_count = u.cc,
+          difficulty = u.diff
+        FROM unnest($1::int[], $2::int[], $3::int[], $4::float[]) AS u(id, ac, cc, diff)
+        WHERE q.id = u.id
+      `, [qIds, qAC, qCC, qDiff]);
+    }
+
+    // ★ バルク2: user_answers 一括挿入（unnest 使用）
+    if (insertUserAnswers.length > 0) {
+      const uUsers = insertUserAnswers.map(() => authUserId);
+      await client.query(`
+        INSERT INTO user_answers (user_id, question_id)
+        SELECT * FROM unnest($1::varchar[], $2::int[])
+        ON CONFLICT DO NOTHING
+      `, [uUsers, insertUserAnswers]);
     }
 
     const totalCount = allQuestions.length;
