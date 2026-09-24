@@ -279,8 +279,8 @@ app.post('/api/submit', strictLimiter, authenticateToken, async (req, res) => {
       const currentAnswerCount = (q.answer_count || 0) + 1;
       const currentCorrectCount = (q.correct_count || 0) + isCorrect;
 
-      // 4択当て推量(25%)を考慮した難易度自動更新
-      if (currentAnswerCount > 50) {
+      // 解答数が20回を超えた場合、4択当て推量(25%)を考慮した難易度自動更新を実行
+      if (currentAnswerCount > 20) {
         const p = (currentCorrectCount + 1) / (currentAnswerCount + 2);
         const pAdjusted = Math.max(0.01, (p - 0.25) / (1 - 0.25));
         let newDifficulty = -Math.log(pAdjusted / (1 - pAdjusted)) / 1.7;
