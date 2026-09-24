@@ -255,10 +255,11 @@ app.post('/api/submit', strictLimiter, authenticateToken, async (req, res) => {
 
     await client.query('BEGIN');
 
-    // ユーザーが過去に解答したことがある問題IDの一覧を取得（初見判定用）
+    // ★ プレースホルダーのインデックスずれを修正 ($2 以降から開始)
+    const userAnswersPlaceholders = validQuestionIds.map((_, i) => `$${i + 2}`).join(',');
     const answeredRes = await client.query(`
       SELECT question_id FROM user_answers 
-      WHERE user_id = $1 AND question_id IN (${placeholders})
+      WHERE user_id = $1 AND question_id IN (${userAnswersPlaceholders})
     `, [authUserId, ...validQuestionIds]);
     const answeredSet = new Set(answeredRes.rows.map(r => r.question_id));
 
@@ -277,7 +278,7 @@ app.post('/api/submit', strictLimiter, authenticateToken, async (req, res) => {
 
       const isFirstTime = !answeredSet.has(q.id);
 
-      // ★ 初見解答の場合のみ、問題側の難易度・解答数を更新
+      // 初見解答の場合のみ問題側の難易度・解答数を更新
       if (isFirstTime) {
         const currentAnswerCount = (q.answer_count || 0) + 1;
         const currentCorrectCount = (q.correct_count || 0) + isCorrect;
@@ -299,7 +300,6 @@ app.post('/api/submit', strictLimiter, authenticateToken, async (req, res) => {
           );
         }
 
-        // 解答履歴テーブルに初見完了フラグを記録
         await client.query(
           `INSERT INTO user_answers (user_id, question_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
           [authUserId, q.id]
