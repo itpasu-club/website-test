@@ -254,7 +254,6 @@ app.post('/api/submit', strictLimiter, authenticateToken, async (req, res) => {
     const userAnswers = (typeof answers === 'object' && answers !== null) ? answers : {};
 
     const placeholders = validQuestionIds.map((_, i) => `$${i + 1}`).join(',');
-    // 復習用に正解・問題文・各選択肢・解説（存在する場合）を取得
     const allQuestionsRes = await client.query(`
       SELECT id, question_text, option1, option2, option3, option4, correct_option, difficulty, answer_count, correct_count, image_url, explanation
       FROM questions WHERE id IN (${placeholders})
@@ -280,9 +279,11 @@ app.post('/api/submit', strictLimiter, authenticateToken, async (req, res) => {
       const currentAnswerCount = (q.answer_count || 0) + 1;
       const currentCorrectCount = (q.correct_count || 0) + isCorrect;
 
+      // 4択当て推量(25%)を考慮した難易度自動更新
       if (currentAnswerCount > 50) {
         const p = (currentCorrectCount + 1) / (currentAnswerCount + 2);
-        let newDifficulty = -Math.log(p / (1 - p)) / 1.7;
+        const pAdjusted = Math.max(0.01, (p - 0.25) / (1 - 0.25));
+        let newDifficulty = -Math.log(pAdjusted / (1 - pAdjusted)) / 1.7;
         newDifficulty = Math.max(-3.0, Math.min(3.0, newDifficulty));
 
         await client.query(
@@ -314,12 +315,10 @@ app.post('/api/submit', strictLimiter, authenticateToken, async (req, res) => {
 
     const totalCount = allQuestions.length;
     const maxScore = 1000;
-    let finalScore = 0;
 
-    if (correctCount > 0) {
-      const irtResult = calculateIRTScore(responses, questionParams);
-      finalScore = irtResult.score;
-    }
+    // 常に IRT 採点(3PL)を実行（全問不正解の場合のみ 0 点）
+    const irtResult = calculateIRTScore(responses, questionParams);
+    const finalScore = (correctCount === 0) ? 0 : irtResult.score;
 
     const categoryName = (!category || category === 'all') ? '全分野' : String(category).substring(0, 50);
 
@@ -332,7 +331,6 @@ app.post('/api/submit', strictLimiter, authenticateToken, async (req, res) => {
 
     logger.info("試験提出完了", { user: authUserId, score: finalScore });
 
-    // details (問題回答・解説詳細リスト) をレスポンスに含める
     res.json({ 
       score: finalScore, 
       maxScore, 
@@ -369,12 +367,13 @@ app.get('/api/history', authenticateToken, async (req, res) => {
   }
 });
 
-// IRT採点ロジック (EAP法)
+// IRT採点ロジック (EAP法 + 3PLモデル)
 function calculateIRTScore(responses, questions) {
   const numNodes = 81;
   const nodes = [];
   const posteriors = [];
 
+  // 1. 事前分布: 標準正規分布 N(0, 1)
   for (let i = 0; i < numNodes; i++) {
     const theta = -4.0 + i * 0.1;
     nodes.push(theta);
@@ -384,6 +383,8 @@ function calculateIRTScore(responses, questions) {
   let sumPosterior = posteriors.reduce((a, b) => a + b, 0);
   for (let i = 0; i < numNodes; i++) posteriors[i] /= sumPosterior;
 
+  // 2. 尤度更新 (3PLモデル: 当て推量 c = 0.25)
+  const c = 0.25;
   for (let i = 0; i < responses.length; i++) {
     const x = responses[i];
     const b = questions[i].difficulty;
@@ -391,14 +392,15 @@ function calculateIRTScore(responses, questions) {
 
     for (let j = 0; j < numNodes; j++) {
       const theta = nodes[j];
-      const p = 1 / (1 + Math.exp(-1.7 * a * (theta - b)));
+      const p = c + (1 - c) / (1 + Math.exp(-1.7 * a * (theta - b)));
       const likelihood = (x === 1) ? p : (1 - p);
       posteriors[j] *= likelihood;
     }
   }
 
+  // 3. 事後分布の正規化 & EAP (期待値) 算出
   sumPosterior = posteriors.reduce((a, b) => a + b, 0);
-  if (sumPosterior === 0) return { theta: 0, score: 200 };
+  if (sumPosterior === 0) return { theta: -3.0, score: 100 };
 
   let thetaEAP = 0;
   for (let j = 0; j < numNodes; j++) {
@@ -406,6 +408,7 @@ function calculateIRTScore(responses, questions) {
     thetaEAP += nodes[j] * posteriors[j];
   }
 
+  // 4. 0〜1000点 スコア換算
   let rawScore = Math.round(600 + thetaEAP * 150);
   let scaledScore = Math.max(100, Math.min(1000, rawScore));
 
