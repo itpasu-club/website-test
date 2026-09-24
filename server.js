@@ -171,7 +171,7 @@ app.get('/api/categories', async (req, res) => {
   }
 });
 
-// 問題取得
+// 問題取得（出題時は正解・解説を含めない）
 app.get('/api/questions', async (req, res) => {
   try {
     const { category, limit } = req.query;
@@ -235,7 +235,7 @@ app.get('/api/questions', async (req, res) => {
   }
 });
 
-// 解答送信 & 採点
+// 解答送信 & 採点（採点結果と同時に正解・問題詳細・解説データも返却）
 app.post('/api/submit', strictLimiter, authenticateToken, async (req, res) => {
   const client = await pool.connect();
   try {
@@ -254,8 +254,9 @@ app.post('/api/submit', strictLimiter, authenticateToken, async (req, res) => {
     const userAnswers = (typeof answers === 'object' && answers !== null) ? answers : {};
 
     const placeholders = validQuestionIds.map((_, i) => `$${i + 1}`).join(',');
+    // 復習用に正解・問題文・各選択肢・解説（存在する場合）を取得
     const allQuestionsRes = await client.query(`
-      SELECT id, correct_option, difficulty, answer_count, correct_count 
+      SELECT id, question_text, option1, option2, option3, option4, correct_option, difficulty, answer_count, correct_count, image_url, explanation
       FROM questions WHERE id IN (${placeholders})
     `, validQuestionIds);
     const allQuestions = allQuestionsRes.rows;
@@ -266,6 +267,7 @@ app.post('/api/submit', strictLimiter, authenticateToken, async (req, res) => {
     const responses = [];
     const questionParams = [];
     let correctCount = 0;
+    const details = [];
 
     for (const q of allQuestions) {
       const userAnswer = userAnswers[q.id];
@@ -293,6 +295,21 @@ app.post('/api/submit', strictLimiter, authenticateToken, async (req, res) => {
           [currentAnswerCount, currentCorrectCount, q.id]
         );
       }
+
+      // クライアントの画面表示用の詳細データ作成
+      details.push({
+        id: q.id,
+        questionText: q.question_text,
+        option1: q.option1,
+        option2: q.option2,
+        option3: q.option3,
+        option4: q.option4,
+        imageUrl: q.image_url || null,
+        explanation: q.explanation || '',
+        userAnswer: userAnswer !== undefined ? Number(userAnswer) : null,
+        correctOption: Number(q.correct_option),
+        isCorrect: isCorrect === 1
+      });
     }
 
     const totalCount = allQuestions.length;
@@ -314,7 +331,15 @@ app.post('/api/submit', strictLimiter, authenticateToken, async (req, res) => {
     await client.query('COMMIT');
 
     logger.info("試験提出完了", { user: authUserId, score: finalScore });
-    res.json({ score: finalScore, maxScore, correctCount, totalCount });
+
+    // details (問題回答・解説詳細リスト) をレスポンスに含める
+    res.json({ 
+      score: finalScore, 
+      maxScore, 
+      correctCount, 
+      totalCount, 
+      details 
+    });
 
   } catch (err) {
     await client.query('ROLLBACK');
