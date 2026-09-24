@@ -8,7 +8,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 
 const app = express();
-app.set('trust proxy', 1); // Render環境でのレート制限（express-rate-limit）用設定
+app.set('trust proxy', 1);
 
 // --- 構造化ロガー ---
 const logger = {
@@ -32,14 +32,12 @@ if (!JWT_SECRET) {
   }
 }
 
-// Supabase Connection String (DATABASE_URL)
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL && NODE_ENV === 'production') {
   logger.error("エラー: 本番環境では DATABASE_URL の設定が必須です。");
   process.exit(1);
 }
 
-// PostgreSQL 接続プール設定
 const pool = new Pool({
   connectionString: DATABASE_URL,
   ssl: NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
@@ -94,7 +92,6 @@ function authenticateToken(req, res, next) {
 
 // ==================== 認証 API ====================
 
-// ユーザー新規登録
 app.post('/api/register', strictLimiter, async (req, res) => {
   try {
     const { username, password } = req.body;
@@ -125,7 +122,6 @@ app.post('/api/register', strictLimiter, async (req, res) => {
   }
 });
 
-// ログイン
 app.post('/api/login', strictLimiter, async (req, res) => {
   try {
     const { username, password } = req.body;
@@ -153,14 +149,12 @@ app.post('/api/login', strictLimiter, async (req, res) => {
   }
 });
 
-// 認証チェック
 app.get('/api/me', authenticateToken, (req, res) => {
   res.json({ username: req.user.username });
 });
 
 // ==================== 試験 API ====================
 
-// カテゴリ一覧取得
 app.get('/api/categories', async (req, res) => {
   try {
     const result = await pool.query("SELECT DISTINCT category FROM questions WHERE category IS NOT NULL AND category != ''");
@@ -171,7 +165,6 @@ app.get('/api/categories', async (req, res) => {
   }
 });
 
-// 問題取得（出題時は正解・解説を含めない）
 app.get('/api/questions', async (req, res) => {
   try {
     const { category, limit } = req.query;
@@ -235,7 +228,7 @@ app.get('/api/questions', async (req, res) => {
   }
 });
 
-// 解答送信 & 採点（採点結果と同時に正解・問題詳細・解説データも返却）
+// 解答送信 & 採点
 app.post('/api/submit', strictLimiter, authenticateToken, async (req, res) => {
   const client = await pool.connect();
   try {
@@ -260,8 +253,14 @@ app.post('/api/submit', strictLimiter, authenticateToken, async (req, res) => {
     `, validQuestionIds);
     const allQuestions = allQuestionsRes.rows;
 
-    // トランザクション開始
     await client.query('BEGIN');
+
+    // ユーザーが過去に解答したことがある問題IDの一覧を取得（初見判定用）
+    const answeredRes = await client.query(`
+      SELECT question_id FROM user_answers 
+      WHERE user_id = $1 AND question_id IN (${placeholders})
+    `, [authUserId, ...validQuestionIds]);
+    const answeredSet = new Set(answeredRes.rows.map(r => r.question_id));
 
     const responses = [];
     const questionParams = [];
@@ -276,28 +275,37 @@ app.post('/api/submit', strictLimiter, authenticateToken, async (req, res) => {
       responses.push(isCorrect);
       questionParams.push({ difficulty: q.difficulty || 0.0, discrimination: 1.0 });
 
-      const currentAnswerCount = (q.answer_count || 0) + 1;
-      const currentCorrectCount = (q.correct_count || 0) + isCorrect;
+      const isFirstTime = !answeredSet.has(q.id);
 
-      // 解答数が20回を超えた場合、4択当て推量(25%)を考慮した難易度自動更新を実行
-      if (currentAnswerCount > 20) {
-        const p = (currentCorrectCount + 1) / (currentAnswerCount + 2);
-        const pAdjusted = Math.max(0.01, (p - 0.25) / (1 - 0.25));
-        let newDifficulty = -Math.log(pAdjusted / (1 - pAdjusted)) / 1.7;
-        newDifficulty = Math.max(-3.0, Math.min(3.0, newDifficulty));
+      // ★ 初見解答の場合のみ、問題側の難易度・解答数を更新
+      if (isFirstTime) {
+        const currentAnswerCount = (q.answer_count || 0) + 1;
+        const currentCorrectCount = (q.correct_count || 0) + isCorrect;
 
+        if (currentAnswerCount > 20) {
+          const p = (currentCorrectCount + 1) / (currentAnswerCount + 2);
+          const pAdjusted = Math.max(0.01, (p - 0.25) / (1 - 0.25));
+          let newDifficulty = -Math.log(pAdjusted / (1 - pAdjusted)) / 1.7;
+          newDifficulty = Math.max(-3.0, Math.min(3.0, newDifficulty));
+
+          await client.query(
+            `UPDATE questions SET answer_count = $1, correct_count = $2, difficulty = $3 WHERE id = $4`,
+            [currentAnswerCount, currentCorrectCount, newDifficulty, q.id]
+          );
+        } else {
+          await client.query(
+            `UPDATE questions SET answer_count = $1, correct_count = $2 WHERE id = $3`,
+            [currentAnswerCount, currentCorrectCount, q.id]
+          );
+        }
+
+        // 解答履歴テーブルに初見完了フラグを記録
         await client.query(
-          `UPDATE questions SET answer_count = $1, correct_count = $2, difficulty = $3 WHERE id = $4`,
-          [currentAnswerCount, currentCorrectCount, newDifficulty, q.id]
-        );
-      } else {
-        await client.query(
-          `UPDATE questions SET answer_count = $1, correct_count = $2 WHERE id = $3`,
-          [currentAnswerCount, currentCorrectCount, q.id]
+          `INSERT INTO user_answers (user_id, question_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+          [authUserId, q.id]
         );
       }
 
-      // クライアントの画面表示用の詳細データ作成
       details.push({
         id: q.id,
         questionText: q.question_text,
@@ -316,7 +324,6 @@ app.post('/api/submit', strictLimiter, authenticateToken, async (req, res) => {
     const totalCount = allQuestions.length;
     const maxScore = 1000;
 
-    // 常に IRT 採点(3PL)を実行（全問不正解の場合のみ 0 点）
     const irtResult = calculateIRTScore(responses, questionParams);
     const finalScore = (correctCount === 0) ? 0 : irtResult.score;
 
@@ -348,7 +355,6 @@ app.post('/api/submit', strictLimiter, authenticateToken, async (req, res) => {
   }
 });
 
-// 成績履歴取得
 app.get('/api/history', authenticateToken, async (req, res) => {
   try {
     const authUserId = req.user.username;
@@ -373,7 +379,6 @@ function calculateIRTScore(responses, questions) {
   const nodes = [];
   const posteriors = [];
 
-  // 1. 事前分布: 標準正規分布 N(0, 1)
   for (let i = 0; i < numNodes; i++) {
     const theta = -4.0 + i * 0.1;
     nodes.push(theta);
@@ -383,7 +388,6 @@ function calculateIRTScore(responses, questions) {
   let sumPosterior = posteriors.reduce((a, b) => a + b, 0);
   for (let i = 0; i < numNodes; i++) posteriors[i] /= sumPosterior;
 
-  // 2. 尤度更新 (3PLモデル: 当て推量 c = 0.25)
   const c = 0.25;
   for (let i = 0; i < responses.length; i++) {
     const x = responses[i];
@@ -398,7 +402,6 @@ function calculateIRTScore(responses, questions) {
     }
   }
 
-  // 3. 事後分布の正規化 & EAP (期待値) 算出
   sumPosterior = posteriors.reduce((a, b) => a + b, 0);
   if (sumPosterior === 0) return { theta: -3.0, score: 100 };
 
@@ -408,25 +411,21 @@ function calculateIRTScore(responses, questions) {
     thetaEAP += nodes[j] * posteriors[j];
   }
 
-  // 4. 0〜1000点 スコア換算
   let rawScore = Math.round(600 + thetaEAP * 150);
   let scaledScore = Math.max(100, Math.min(1000, rawScore));
 
   return { theta: Number(thetaEAP.toFixed(3)), score: scaledScore };
 }
 
-// 共通エラーハンドリング
 app.use((err, req, res, next) => {
   logger.error('Unhandled API Error', { error: err.message, stack: err.stack });
   res.status(500).json({ error: "内部サーバーエラーが発生しました。" });
 });
 
-// --- サーバー起動 ---
 const server = app.listen(PORT, () => {
   logger.info(`サーバーが正常起動しました`, { port: PORT, env: NODE_ENV });
 });
 
-// --- グレースフルシャットダウン ---
 function shutdown(signal) {
   logger.info(`${signal} シグナルを受信しました。サーバーを正常停止します...`);
   server.close(async () => {
