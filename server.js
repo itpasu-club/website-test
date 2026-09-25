@@ -6,6 +6,7 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const cors = require('cors'); // CORS対策ライブラリ
 
 const app = express();
 app.set('trust proxy', 1);
@@ -53,9 +54,27 @@ process.on('unhandledRejection', (reason) => {
   logger.error('未処理のPromise拒否が発生しました', { reason: String(reason) });
 });
 
-// --- ミドルウェア設定 ---
+// --- CORS設定（セキュリティ強化） ---
+const allowedOrigins = [
+  process.env.FRONTEND_URL, // 本番環境のURL（例: https://your-app.onrender.com）
+  'http://localhost:3000'   // ローカル開発用環境
+].filter(Boolean);
+
+app.use(cors({
+  origin: function (origin, callback) {
+    // originが無いリクエスト（同一ドメインアクセスやサーバー間通信）または許可リストに含まれる場合
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('CORSポリシーにより制限されています。許可されていないオリジンからのアクセスです。'));
+    }
+  },
+  credentials: true
+}));
+
+// --- セキュリティ・基本ミドルウェア設定 ---
 app.use(helmet({ contentSecurityPolicy: false }));
-app.use(express.json({ limit: '10kb' }));
+app.use(express.json({ limit: '10kb' })); // 巨大リクエスト攻撃(DoS)防止
 app.use(express.static(path.join(__dirname, 'public')));
 
 // --- レートリミット設定 ---
@@ -155,7 +174,7 @@ app.get('/api/me', authenticateToken, (req, res) => {
 
 // ==================== 試験 API ====================
 
-// カテゴリキャッシュ（5分間保持）
+// カテゴリキャッシュ（5分間キャッシュでDB負荷低減）
 let categoryCache = null;
 let categoryCacheTime = 0;
 
@@ -240,7 +259,7 @@ app.get('/api/questions', async (req, res) => {
   }
 });
 
-// 解答送信 & 採点 (一括バルク更新適用で超高速化)
+// 解答送信 & 採点 (バルク更新適用・超高速化)
 app.post('/api/submit', strictLimiter, authenticateToken, async (req, res) => {
   const client = await pool.connect();
   try {
@@ -279,9 +298,8 @@ app.post('/api/submit', strictLimiter, authenticateToken, async (req, res) => {
     let correctCount = 0;
     const details = [];
 
-    // バルク処理用配列
-    const updateQuestions = []; // { id, answer_count, correct_count, difficulty }
-    const insertUserAnswers = []; // question_id
+    const updateQuestions = [];
+    const insertUserAnswers = [];
 
     for (const q of allQuestions) {
       const userAnswer = userAnswers[q.id];
@@ -330,7 +348,7 @@ app.post('/api/submit', strictLimiter, authenticateToken, async (req, res) => {
       });
     }
 
-    // ★ バルク1: questions 一括更新（unnest 使用）
+    // ★ バルク1: questions 一括更新（unnest）
     if (updateQuestions.length > 0) {
       const qIds = updateQuestions.map(u => u.id);
       const qAC = updateQuestions.map(u => u.answer_count);
@@ -348,7 +366,7 @@ app.post('/api/submit', strictLimiter, authenticateToken, async (req, res) => {
       `, [qIds, qAC, qCC, qDiff]);
     }
 
-    // ★ バルク2: user_answers 一括挿入（unnest 使用）
+    // ★ バルク2: user_answers 一括挿入（unnest）
     if (insertUserAnswers.length > 0) {
       const uUsers = insertUserAnswers.map(() => authUserId);
       await client.query(`
@@ -454,6 +472,7 @@ function calculateIRTScore(responses, questions) {
   return { theta: Number(thetaEAP.toFixed(3)), score: scaledScore };
 }
 
+// エラーハンドリングミドルウェア
 app.use((err, req, res, next) => {
   logger.error('Unhandled API Error', { error: err.message, stack: err.stack });
   res.status(500).json({ error: "内部サーバーエラーが発生しました。" });
