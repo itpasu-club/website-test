@@ -665,12 +665,15 @@ app.post('/api/cat/answer', authenticateToken, async (req, res) => {
     const excludeIds = updatedHistory.map(h => h.questionId);
 
     // 解いていない問題の中から、算出された能力 theta に最も近い難易度の問題を検索
+    const excludePlaceholders = excludeIds.map((_, i) => `$${i + 2}`).join(',');
+    const thetaParamIndex = `$${excludeIds.length + 2}`;
+
     const nextQRes = await pool.query(`
       SELECT id, category, question_text, option1, option2, option3, option4, image_url, difficulty
       FROM questions
-      WHERE id NOT IN (${excludeIds.map((_, i) => `$${i + 2}`).join(',')})
+      WHERE id NOT IN (${excludePlaceholders})
         AND category LIKE $1
-      ORDER BY ABS(COALESCE(difficulty, 0.0) - $2) ASC, RANDOM()
+      ORDER BY ABS(COALESCE(difficulty, 0.0) - ${thetaParamIndex}) ASC, RANDOM()
       LIMIT 1
     `, [targetCatPattern, ...excludeIds, currentTheta]);
 
@@ -678,11 +681,14 @@ app.post('/api/cat/answer', authenticateToken, async (req, res) => {
 
     // フォールバック: 条件に合う問題が切れた場合、カテゴリ無制限で未解答から探索
     if (!nextQuestion) {
+      const fallbackExcludePlaceholders = excludeIds.map((_, i) => `$${i + 1}`).join(',');
+      const fallbackThetaParamIndex = `$${excludeIds.length + 1}`;
+
       const fallbackRes = await pool.query(`
         SELECT id, category, question_text, option1, option2, option3, option4, image_url, difficulty
         FROM questions
-        WHERE id NOT IN (${excludeIds.map((_, i) => `$${i + 1}`).join(',')})
-        ORDER BY ABS(COALESCE(difficulty, 0.0) - $2) ASC, RANDOM()
+        WHERE id NOT IN (${fallbackExcludePlaceholders})
+        ORDER BY ABS(COALESCE(difficulty, 0.0) - ${fallbackThetaParamIndex}) ASC, RANDOM()
         LIMIT 1
       `, [...excludeIds, currentTheta]);
       nextQuestion = fallbackRes.rows[0];
