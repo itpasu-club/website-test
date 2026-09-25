@@ -137,7 +137,6 @@ function authenticateToken(req, res, next) {
   });
 }
 
-// 任意でユーザー名を取得するユーティリティ（未ログインでもエラーにしない）
 function getOptionalUsername(req) {
   try {
     const authHeader = req.headers['authorization'];
@@ -213,7 +212,7 @@ app.get('/api/me', authenticateToken, (req, res) => {
   res.json({ username: req.user.username });
 });
 
-// ==================== 試験 API ====================
+// ==================== 従来試験 API ====================
 
 let categoryCache = null;
 let categoryCacheTime = 0;
@@ -336,7 +335,6 @@ app.get('/api/questions', async (req, res) => {
   }
 });
 
-// 解答送信 & 採点 (指数移動平均 EMA を用いた難易度パラメータ調整)
 app.post('/api/submit', strictLimiter, authenticateToken, async (req, res) => {
   const client = await pool.connect();
   try {
@@ -391,20 +389,17 @@ app.post('/api/submit', strictLimiter, authenticateToken, async (req, res) => {
       if (isFirstTime) {
         const currentAnswerCount = (q.answer_count || 0) + 1;
         const currentCorrectCount = (q.correct_count || 0) + isCorrect;
-        const oldDifficulty = q.difficulty || 0.0;
-        let newDifficulty = oldDifficulty;
+        let newDifficulty = q.difficulty || 0.0;
 
         if (currentAnswerCount > 10) {
           const p = (currentCorrectCount + 1) / (currentAnswerCount + 2);
           const pAdjusted = Math.max(0.01, (p - 0.25) / (1 - 0.25));
-          let calculatedDifficulty = -Math.log(pAdjusted / (1 - pAdjusted)) / 1.7;
-          calculatedDifficulty = Math.max(-3.0, Math.min(3.0, calculatedDifficulty));
+          const calculatedDifficulty = -Math.log(pAdjusted / (1 - pAdjusted)) / 1.7;
 
-          // ★ 指数移動平均 (EMA) による段階的スモーシング更新
-          // 平滑化係数 alpha = 0.1 (過去の難易度重み: 90%, 新規計算値重み: 10%)
           const alpha = 0.1;
+          const oldDifficulty = q.difficulty || 0.0;
           newDifficulty = (1 - alpha) * oldDifficulty + alpha * calculatedDifficulty;
-          newDifficulty = Number(newDifficulty.toFixed(4));
+          newDifficulty = Math.max(-3.0, Math.min(3.0, newDifficulty));
         }
 
         updateQuestions.push({
@@ -435,7 +430,6 @@ app.post('/api/submit', strictLimiter, authenticateToken, async (req, res) => {
       });
     }
 
-    // バルク1: questions 一括更新
     if (updateQuestions.length > 0) {
       const qIds = updateQuestions.map(u => u.id);
       const qAC = updateQuestions.map(u => u.answer_count);
@@ -453,7 +447,6 @@ app.post('/api/submit', strictLimiter, authenticateToken, async (req, res) => {
       `, [qIds, qAC, qCC, qDiff]);
     }
 
-    // バルク2: user_answers 一括挿入・更新 (UPSERT)
     if (upsertUserAnswers.length > 0) {
       const uUsers = upsertUserAnswers.map(() => authUserId);
       const uQIds = upsertUserAnswers.map(u => u.question_id);
@@ -501,7 +494,223 @@ app.post('/api/submit', strictLimiter, authenticateToken, async (req, res) => {
   }
 });
 
-// 弱点分析 API エンドポイント
+// ==================== ★ CAT（適応型テスト）専用 API ====================
+
+// CAT開始 API: 最初の1問目（初期能力 theta = 0.0）を取得
+app.post('/api/cat/start', async (req, res) => {
+  try {
+    const { category } = req.body;
+    let targetCatPattern = '%';
+
+    if (category && category !== 'all') {
+      targetCatPattern = `%${category}%`;
+    } else {
+      // 全分野選択時は、最初は「ストラテジ」系からスタート
+      targetCatPattern = '%ストラテジ%';
+    }
+
+    // 初期能力 theta = 0.0 に最も難易度(difficulty)が近い問題を1問取得
+    const sql = `
+      SELECT id, category, question_text, option1, option2, option3, option4, image_url, difficulty
+      FROM questions
+      WHERE category LIKE $1
+      ORDER BY ABS(COALESCE(difficulty, 0.0) - 0.0) ASC, RANDOM()
+      LIMIT 1
+    `;
+    const result = await pool.query(sql, [targetCatPattern]);
+
+    if (result.rows.length === 0) {
+      return res.status(444).json({ error: "出題可能な問題が見つかりませんでした。" });
+    }
+
+    res.json({
+      step: 1,
+      totalSteps: 20,
+      question: result.rows[0],
+      history: []
+    });
+  } catch (err) {
+    logger.error("CAT開始エラー", { error: err.message });
+    res.status(500).json({ error: "CATテストの開始に失敗しました。" });
+  }
+});
+
+// CAT解答 ＆ 次問題取得 API (一問一答型)
+app.post('/api/cat/answer', authenticateToken, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { questionId, userAnswer, history, category } = req.body;
+    const authUserId = req.user.username;
+
+    if (!questionId || userAnswer === undefined || !Array.isArray(history)) {
+      return res.status(400).json({ error: "リクエストパラメータが不正です。" });
+    }
+
+    // 1. 今回回答された問題の情報を取得
+    const qRes = await client.query(`
+      SELECT id, question_text, option1, option2, option3, option4, correct_option, difficulty, answer_count, correct_count, explanation
+      FROM questions WHERE id = $1
+    `, [Number(questionId)]);
+
+    if (qRes.rows.length === 0) {
+      return res.status(404).json({ error: "問題が見つかりません。" });
+    }
+
+    const currentQ = qRes.rows[0];
+    const isCorrect = (Number(userAnswer) === Number(currentQ.correct_option)) ? 1 : 0;
+
+    await client.query('BEGIN');
+
+    // 2. ユーザーの解答ログ(user_answers)の記録・更新
+    const answeredCheck = await client.query(`
+      SELECT question_id FROM user_answers WHERE user_id = $1 AND question_id = $2
+    `, [authUserId, currentQ.id]);
+
+    const isFirstTime = (answeredCheck.rows.length === 0);
+
+    // 初回回答なら難易度(difficulty)のEMA更新を実施
+    if (isFirstTime) {
+      const currentAnswerCount = (currentQ.answer_count || 0) + 1;
+      const currentCorrectCount = (currentQ.correct_count || 0) + isCorrect;
+      let newDifficulty = currentQ.difficulty || 0.0;
+
+      if (currentAnswerCount > 10) {
+        const p = (currentCorrectCount + 1) / (currentAnswerCount + 2);
+        const pAdjusted = Math.max(0.01, (p - 0.25) / (1 - 0.25));
+        const calculatedDifficulty = -Math.log(pAdjusted / (1 - pAdjusted)) / 1.7;
+
+        const alpha = 0.1;
+        const oldDifficulty = currentQ.difficulty || 0.0;
+        newDifficulty = (1 - alpha) * oldDifficulty + alpha * calculatedDifficulty;
+        newDifficulty = Math.max(-3.0, Math.min(3.0, newDifficulty));
+      }
+
+      await client.query(`
+        UPDATE questions SET answer_count = $1, correct_count = $2, difficulty = $3 WHERE id = $4
+      `, [currentAnswerCount, currentCorrectCount, newDifficulty, currentQ.id]);
+    }
+
+    await client.query(`
+      INSERT INTO user_answers (user_id, question_id, is_correct, answered_at)
+      VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+      ON CONFLICT (user_id, question_id) 
+      DO UPDATE SET is_correct = EXCLUDED.is_correct, answered_at = CURRENT_TIMESTAMP
+    `, [authUserId, currentQ.id, isCorrect]);
+
+    await client.query('COMMIT');
+
+    // 3. 解答履歴(history)の更新
+    const updatedHistory = [
+      ...history,
+      {
+        questionId: currentQ.id,
+        isCorrect: isCorrect,
+        difficulty: currentQ.difficulty || 0.0,
+        discrimination: 1.0,
+        userAnswer: Number(userAnswer),
+        correctOption: Number(currentQ.correct_option),
+        explanation: currentQ.explanation || ''
+      }
+    ];
+
+    // 4. これまでの履歴からIRTで暫定能力 theta を計算
+    const responses = updatedHistory.map(h => h.isCorrect);
+    const questionParams = updatedHistory.map(h => ({ difficulty: h.difficulty, discrimination: 1.0 }));
+    const irtResult = calculateIRTScore(responses, questionParams);
+    const currentTheta = irtResult.theta;
+
+    const totalSteps = 20;
+
+    // ★ 5. 終了判定: 規定問題数(20問)に達した場合
+    if (updatedHistory.length >= totalSteps) {
+      const correctCount = updatedHistory.filter(h => h.isCorrect === 1).length;
+      const finalScore = (correctCount === 0) ? 0 : irtResult.score;
+      const categoryName = (!category || category === 'all') ? 'CATスピードテスト' : `CAT:${String(category).substring(0, 45)}`;
+
+      await pool.query(
+        `INSERT INTO results (user_id, score, max_score, category, correct_count, total_count) VALUES ($1, $2, $3, $4, $5, $6)`,
+        [authUserId, finalScore, 1000, categoryName, correctCount, totalSteps]
+      );
+
+      return res.json({
+        isFinished: true,
+        score: finalScore,
+        maxScore: 1000,
+        correctCount: correctCount,
+        totalCount: totalSteps,
+        currentTheta: currentTheta,
+        lastAnswerCorrect: isCorrect === 1,
+        explanation: currentQ.explanation || '',
+        correctOption: Number(currentQ.correct_option),
+        history: updatedHistory
+      });
+    }
+
+    // ★ 6. 継続判定: 次の出題問題を決定
+    let targetCatPattern = '%';
+    if (category && category !== 'all') {
+      targetCatPattern = `%${category}%`;
+    } else {
+      // 20問テスト時の分野出題枠制御 (ストラテジ: 1-6問目, マネジメント: 7-10問目, テクノロジ: 11-20問目)
+      const nextStepIndex = updatedHistory.length; // 次が何問目か(0-indexed)
+      if (nextStepIndex < 6) {
+        targetCatPattern = '%ストラテジ%';
+      } else if (nextStepIndex < 10) {
+        targetCatPattern = '%マネジメント%';
+      } else {
+        targetCatPattern = '%テクノロジ%';
+      }
+    }
+
+    const excludeIds = updatedHistory.map(h => h.questionId);
+
+    // 解いていない問題の中から、算出された能力 theta に最も近い難易度の問題を検索
+    const nextQRes = await pool.query(`
+      SELECT id, category, question_text, option1, option2, option3, option4, image_url, difficulty
+      FROM questions
+      WHERE id NOT IN (${excludeIds.map((_, i) => `$${i + 2}`).join(',')})
+        AND category LIKE $1
+      ORDER BY ABS(COALESCE(difficulty, 0.0) - $2) ASC, RANDOM()
+      LIMIT 1
+    `, [targetCatPattern, ...excludeIds, currentTheta]);
+
+    let nextQuestion = nextQRes.rows[0];
+
+    // フォールバック: 条件に合う問題が切れた場合、カテゴリ無制限で未解答から探索
+    if (!nextQuestion) {
+      const fallbackRes = await pool.query(`
+        SELECT id, category, question_text, option1, option2, option3, option4, image_url, difficulty
+        FROM questions
+        WHERE id NOT IN (${excludeIds.map((_, i) => `$${i + 1}`).join(',')})
+        ORDER BY ABS(COALESCE(difficulty, 0.0) - $2) ASC, RANDOM()
+        LIMIT 1
+      `, [...excludeIds, currentTheta]);
+      nextQuestion = fallbackRes.rows[0];
+    }
+
+    res.json({
+      isFinished: false,
+      step: updatedHistory.length + 1,
+      totalSteps: totalSteps,
+      currentTheta: currentTheta,
+      lastAnswerCorrect: isCorrect === 1,
+      explanation: currentQ.explanation || '',
+      correctOption: Number(currentQ.correct_option),
+      question: nextQuestion,
+      history: updatedHistory
+    });
+
+  } catch (err) {
+    await client.query('ROLLBACK');
+    logger.error("CAT解答処理エラー", { error: err.message });
+    res.status(500).json({ error: "CAT解答処理に失敗しました。" });
+  } finally {
+    client.release();
+  }
+});
+
+// ==================== 分析・履歴 API ====================
+
 app.get('/api/analytics', authenticateToken, async (req, res) => {
   try {
     const authUserId = req.user.username;
