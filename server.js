@@ -68,10 +68,10 @@ async function initDb() {
     `);
     logger.info("DBスキーマ初期化完了");
   } catch (err) {
-    logger.warn("DB初期化チェック警告", { error: err.message });
+    logger.error("DB初期化失敗のため停止します", { error: err.message });
+    process.exit(1);
   }
 }
-initDb();
 
 // --- プロセス例外ハンドリング ---
 process.on('uncaughtException', (err) => {
@@ -496,8 +496,8 @@ app.post('/api/submit', strictLimiter, authenticateToken, async (req, res) => {
 
 // ==================== ★ CAT（適応型テスト）専用 API ====================
 
-// CAT開始 API: 最初の1問目（初期能力 theta = 0.0）を取得
-app.post('/api/cat/start', async (req, res) => {
+// CAT開始 API: 1問目取得（strictLimiterを適用）
+app.post('/api/cat/start', strictLimiter, async (req, res) => {
   try {
     const { category } = req.body;
     let targetCatPattern = '%';
@@ -505,11 +505,9 @@ app.post('/api/cat/start', async (req, res) => {
     if (category && category !== 'all') {
       targetCatPattern = `%${category}%`;
     } else {
-      // 全分野選択時は、最初は「ストラテジ」系からスタート
       targetCatPattern = '%ストラテジ%';
     }
 
-    // 初期能力 theta = 0.0 に最も難易度(difficulty)が近い問題を1問取得
     const sql = `
       SELECT id, category, question_text, option1, option2, option3, option4, image_url, difficulty
       FROM questions
@@ -546,7 +544,6 @@ app.post('/api/cat/answer', authenticateToken, async (req, res) => {
       return res.status(400).json({ error: "リクエストパラメータが不正です。" });
     }
 
-    // 1. 今回回答された問題の情報を取得
     const qRes = await client.query(`
       SELECT id, question_text, option1, option2, option3, option4, correct_option, difficulty, answer_count, correct_count, explanation
       FROM questions WHERE id = $1
@@ -561,14 +558,12 @@ app.post('/api/cat/answer', authenticateToken, async (req, res) => {
 
     await client.query('BEGIN');
 
-    // 2. ユーザーの解答ログ(user_answers)の記録・更新
     const answeredCheck = await client.query(`
       SELECT question_id FROM user_answers WHERE user_id = $1 AND question_id = $2
     `, [authUserId, currentQ.id]);
 
     const isFirstTime = (answeredCheck.rows.length === 0);
 
-    // 初回回答なら難易度(difficulty)のEMA更新を実施
     if (isFirstTime) {
       const currentAnswerCount = (currentQ.answer_count || 0) + 1;
       const currentCorrectCount = (currentQ.correct_count || 0) + isCorrect;
@@ -599,7 +594,6 @@ app.post('/api/cat/answer', authenticateToken, async (req, res) => {
 
     await client.query('COMMIT');
 
-    // 3. 解答履歴(history)の更新
     const updatedHistory = [
       ...history,
       {
@@ -613,7 +607,6 @@ app.post('/api/cat/answer', authenticateToken, async (req, res) => {
       }
     ];
 
-    // 4. これまでの履歴からIRTで暫定能力 theta を計算
     const responses = updatedHistory.map(h => h.isCorrect);
     const questionParams = updatedHistory.map(h => ({ difficulty: h.difficulty, discrimination: 1.0 }));
     const irtResult = calculateIRTScore(responses, questionParams);
@@ -621,7 +614,6 @@ app.post('/api/cat/answer', authenticateToken, async (req, res) => {
 
     const totalSteps = 20;
 
-    // ★ 5. 終了判定: 規定問題数(20問)に達した場合
     if (updatedHistory.length >= totalSteps) {
       const correctCount = updatedHistory.filter(h => h.isCorrect === 1).length;
       const finalScore = (correctCount === 0) ? 0 : irtResult.score;
@@ -646,13 +638,11 @@ app.post('/api/cat/answer', authenticateToken, async (req, res) => {
       });
     }
 
-    // ★ 6. 継続判定: 次の出題問題を決定
     let targetCatPattern = '%';
     if (category && category !== 'all') {
       targetCatPattern = `%${category}%`;
     } else {
-      // 20問テスト時の分野出題枠制御 (ストラテジ: 1-6問目, マネジメント: 7-10問目, テクノロジ: 11-20問目)
-      const nextStepIndex = updatedHistory.length; // 次が何問目か(0-indexed)
+      const nextStepIndex = updatedHistory.length;
       if (nextStepIndex < 6) {
         targetCatPattern = '%ストラテジ%';
       } else if (nextStepIndex < 10) {
@@ -664,7 +654,6 @@ app.post('/api/cat/answer', authenticateToken, async (req, res) => {
 
     const excludeIds = updatedHistory.map(h => h.questionId);
 
-    // 解いていない問題の中から、算出された能力 theta に最も近い難易度の問題を検索
     const excludePlaceholders = excludeIds.map((_, i) => `$${i + 2}`).join(',');
     const thetaParamIndex = `$${excludeIds.length + 2}`;
 
@@ -679,7 +668,6 @@ app.post('/api/cat/answer', authenticateToken, async (req, res) => {
 
     let nextQuestion = nextQRes.rows[0];
 
-    // フォールバック: 条件に合う問題が切れた場合、カテゴリ無制限で未解答から探索
     if (!nextQuestion) {
       const fallbackExcludePlaceholders = excludeIds.map((_, i) => `$${i + 1}`).join(',');
       const fallbackThetaParamIndex = `$${excludeIds.length + 1}`;
@@ -748,7 +736,9 @@ app.get('/api/analytics', authenticateToken, async (req, res) => {
     const totalCorr = overallStats.rows[0]?.total_correct || 0;
     const overallAccuracy = totalAns > 0 ? Number(((totalCorr / totalAns) * 100).toFixed(1)) : 0;
 
-    const weakest = categoryStats.rows.length > 0 ? categoryStats.rows[0] : null;
+    // 最低5問以上回答している分野の中から最弱点を特定（サンプル不足による誤判定防止）
+    const qualifiedWeak = categoryStats.rows.find(c => c.total_answered >= 5);
+    const weakest = qualifiedWeak || (categoryStats.rows.length > 0 ? categoryStats.rows[0] : null);
 
     res.json({
       overall: {
@@ -770,11 +760,12 @@ app.get('/api/history', authenticateToken, async (req, res) => {
   try {
     const authUserId = req.user.username;
 
+    // 最新の受験結果が最上部に来るよう DESC で取得
     const history = await pool.query(`
       SELECT 
         id, user_id, score, max_score, category, correct_count, total_count, 
         to_char(created_at, 'YYYY/MM/DD HH24:MI') as date
-      FROM results WHERE user_id = $1 ORDER BY id ASC
+      FROM results WHERE user_id = $1 ORDER BY id DESC
     `, [authUserId]);
 
     res.json(history.rows);
@@ -784,7 +775,7 @@ app.get('/api/history', authenticateToken, async (req, res) => {
   }
 });
 
-// IRT採点ロジック (EAP法 + 3PLモデル)
+// IRT採点ロジック (EAP法 + 3PLモデルベースのアプリ独自推定)
 function calculateIRTScore(responses, questions) {
   const numNodes = 81;
   const nodes = [];
@@ -822,6 +813,7 @@ function calculateIRTScore(responses, questions) {
     thetaEAP += nodes[j] * posteriors[j];
   }
 
+  // アプリ独自のIRT風スコア換算 (公式ITパスポートの得点換算表とは異なります)
   let rawScore = Math.round(600 + thetaEAP * 150);
   let scaledScore = Math.max(100, Math.min(1000, rawScore));
 
@@ -834,23 +826,30 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: "内部サーバーエラーが発生しました。" });
 });
 
-const server = app.listen(PORT, () => {
-  logger.info(`サーバーが正常起動しました`, { port: PORT, env: NODE_ENV });
-});
+// --- サーバー起動ロジック（DB初期化を確実にしてから起動） ---
+async function startServer() {
+  await initDb();
 
-function shutdown(signal) {
-  logger.info(`${signal} シグナルを受信しました。サーバーを正常停止します...`);
-  server.close(async () => {
-    logger.info('HTTP サーバーを停止しました。');
-    try {
-      await pool.end();
-      logger.info('PostgreSQL 接続プールをクローズしました。');
-    } catch (e) {
-      logger.error('DBクローズ時にエラーが発生しました', { error: e.message });
-    }
-    process.exit(0);
+  const server = app.listen(PORT, () => {
+    logger.info(`サーバーが正常起動しました`, { port: PORT, env: NODE_ENV });
   });
+
+  function shutdown(signal) {
+    logger.info(`${signal} シグナルを受信しました。サーバーを正常停止します...`);
+    server.close(async () => {
+      logger.info('HTTP サーバーを停止しました。');
+      try {
+        await pool.end();
+        logger.info('PostgreSQL 接続プールをクローズしました。');
+      } catch (e) {
+        logger.error('DBクローズ時にエラーが発生しました', { error: e.message });
+      }
+      process.exit(0);
+    });
+  }
+
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
 }
 
-process.on('SIGINT', () => shutdown('SIGINT'));
-process.on('SIGTERM', () => shutdown('SIGTERM'));
+startServer();
