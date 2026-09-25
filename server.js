@@ -236,7 +236,6 @@ app.get('/api/categories', async (req, res) => {
   }
 });
 
-// ★ 【改善①】未回答優先 ＋ 直近問題の回避（＋弱点モード対応）の出題取得API
 app.get('/api/questions', async (req, res) => {
   try {
     const { category, limit, mode } = req.query;
@@ -246,9 +245,6 @@ app.get('/api/questions', async (req, res) => {
 
     const username = getOptionalUsername(req) || 'GUEST';
 
-    // ソート順の構築:
-    // mode === 'weakness' (弱点克服モード) : 不正解(0)を最優先 -> 古い問題順 -> ランダム
-    // デフォルト : 未回答(0)を最優先 -> 回答日時が古い順(直近回答を回避) -> ランダム
     let orderClause = "";
     if (mode === 'weakness') {
       orderClause = `
@@ -340,7 +336,7 @@ app.get('/api/questions', async (req, res) => {
   }
 });
 
-// 解答送信 & 採点 (ユーザーの正誤状態・最終回答日時をバルク更新)
+// 解答送信 & 採点 (指数移動平均 EMA を用いた難易度パラメータ調整)
 app.post('/api/submit', strictLimiter, authenticateToken, async (req, res) => {
   const client = await pool.connect();
   try {
@@ -395,13 +391,20 @@ app.post('/api/submit', strictLimiter, authenticateToken, async (req, res) => {
       if (isFirstTime) {
         const currentAnswerCount = (q.answer_count || 0) + 1;
         const currentCorrectCount = (q.correct_count || 0) + isCorrect;
-        let newDifficulty = q.difficulty || 0.0;
+        const oldDifficulty = q.difficulty || 0.0;
+        let newDifficulty = oldDifficulty;
 
         if (currentAnswerCount > 10) {
           const p = (currentCorrectCount + 1) / (currentAnswerCount + 2);
           const pAdjusted = Math.max(0.01, (p - 0.25) / (1 - 0.25));
-          newDifficulty = -Math.log(pAdjusted / (1 - pAdjusted)) / 1.7;
-          newDifficulty = Math.max(-3.0, Math.min(3.0, newDifficulty));
+          let calculatedDifficulty = -Math.log(pAdjusted / (1 - pAdjusted)) / 1.7;
+          calculatedDifficulty = Math.max(-3.0, Math.min(3.0, calculatedDifficulty));
+
+          // ★ 指数移動平均 (EMA) による段階的スモーシング更新
+          // 平滑化係数 alpha = 0.1 (過去の難易度重み: 90%, 新規計算値重み: 10%)
+          const alpha = 0.1;
+          newDifficulty = (1 - alpha) * oldDifficulty + alpha * calculatedDifficulty;
+          newDifficulty = Number(newDifficulty.toFixed(4));
         }
 
         updateQuestions.push({
@@ -412,7 +415,6 @@ app.post('/api/submit', strictLimiter, authenticateToken, async (req, res) => {
         });
       }
 
-      // ユーザーごとの解答履歴ログ用データ（正否・日時を更新）
       upsertUserAnswers.push({
         question_id: q.id,
         is_correct: isCorrect
@@ -433,7 +435,7 @@ app.post('/api/submit', strictLimiter, authenticateToken, async (req, res) => {
       });
     }
 
-    // ★ バルク1: questions 一括更新
+    // バルク1: questions 一括更新
     if (updateQuestions.length > 0) {
       const qIds = updateQuestions.map(u => u.id);
       const qAC = updateQuestions.map(u => u.answer_count);
@@ -451,7 +453,7 @@ app.post('/api/submit', strictLimiter, authenticateToken, async (req, res) => {
       `, [qIds, qAC, qCC, qDiff]);
     }
 
-    // ★ バルク2: user_answers 一括挿入・更新 (UPSERT)
+    // バルク2: user_answers 一括挿入・更新 (UPSERT)
     if (upsertUserAnswers.length > 0) {
       const uUsers = upsertUserAnswers.map(() => authUserId);
       const uQIds = upsertUserAnswers.map(u => u.question_id);
@@ -499,12 +501,11 @@ app.post('/api/submit', strictLimiter, authenticateToken, async (req, res) => {
   }
 });
 
-// ★ 【改善②】弱点分析 API エンドポイント
+// 弱点分析 API エンドポイント
 app.get('/api/analytics', authenticateToken, async (req, res) => {
   try {
     const authUserId = req.user.username;
 
-    // 分野ごとの正答率・解答数の集計
     const categoryStats = await pool.query(`
       SELECT 
         COALESCE(q.category, '全般') as category,
@@ -520,7 +521,6 @@ app.get('/api/analytics', authenticateToken, async (req, res) => {
       ORDER BY accuracy ASC
     `, [authUserId]);
 
-    // 全体集計
     const overallStats = await pool.query(`
       SELECT 
         COUNT(ua.question_id)::int as total_answered,
