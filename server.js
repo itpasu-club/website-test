@@ -6,7 +6,7 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const cors = require('cors'); // CORS対策ライブラリ
+const cors = require('cors');
 
 const app = express();
 app.set('trust proxy', 1);
@@ -44,6 +44,35 @@ const pool = new Pool({
   ssl: NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 });
 
+// --- DB スキーマの自動チェック・初期化 ---
+async function initDb() {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id SERIAL PRIMARY KEY,
+        username VARCHAR(50) UNIQUE NOT NULL,
+        password_hash VARCHAR(255) NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE TABLE IF NOT EXISTS user_answers (
+        user_id VARCHAR(50) NOT NULL,
+        question_id INT NOT NULL,
+        is_correct INT DEFAULT 0,
+        answered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (user_id, question_id)
+      );
+
+      ALTER TABLE user_answers ADD COLUMN IF NOT EXISTS is_correct INT DEFAULT 0;
+      ALTER TABLE user_answers ADD COLUMN IF NOT EXISTS answered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
+    `);
+    logger.info("DBスキーマ初期化完了");
+  } catch (err) {
+    logger.warn("DB初期化チェック警告", { error: err.message });
+  }
+}
+initDb();
+
 // --- プロセス例外ハンドリング ---
 process.on('uncaughtException', (err) => {
   logger.error('未捕捉の例外が発生したため終了します', { error: err.message, stack: err.stack });
@@ -54,15 +83,14 @@ process.on('unhandledRejection', (reason) => {
   logger.error('未処理のPromise拒否が発生しました', { reason: String(reason) });
 });
 
-// --- CORS設定（セキュリティ強化） ---
+// --- CORS設定 ---
 const allowedOrigins = [
-  process.env.FRONTEND_URL, // 本番環境のURL（例: https://your-app.onrender.com）
-  'http://localhost:3000'   // ローカル開発用環境
+  process.env.FRONTEND_URL,
+  'http://localhost:3000'
 ].filter(Boolean);
 
 app.use(cors({
   origin: function (origin, callback) {
-    // originが無いリクエスト（同一ドメインアクセスやサーバー間通信）または許可リストに含まれる場合
     if (!origin || allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
@@ -74,7 +102,7 @@ app.use(cors({
 
 // --- セキュリティ・基本ミドルウェア設定 ---
 app.use(helmet({ contentSecurityPolicy: false }));
-app.use(express.json({ limit: '10kb' })); // 巨大リクエスト攻撃(DoS)防止
+app.use(express.json({ limit: '10kb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 // --- レートリミット設定 ---
@@ -107,6 +135,19 @@ function authenticateToken(req, res, next) {
     req.user = user;
     next();
   });
+}
+
+// 任意でユーザー名を取得するユーティリティ（未ログインでもエラーにしない）
+function getOptionalUsername(req) {
+  try {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+    if (!token) return null;
+    const decoded = jwt.verify(token, JWT_SECRET);
+    return decoded ? decoded.username : null;
+  } catch (e) {
+    return null;
+  }
 }
 
 // ==================== 認証 API ====================
@@ -174,7 +215,6 @@ app.get('/api/me', authenticateToken, (req, res) => {
 
 // ==================== 試験 API ====================
 
-// カテゴリキャッシュ（5分間キャッシュでDB負荷低減）
 let categoryCache = null;
 let categoryCacheTime = 0;
 
@@ -196,12 +236,35 @@ app.get('/api/categories', async (req, res) => {
   }
 });
 
+// ★ 【改善①】未回答優先 ＋ 直近問題の回避（＋弱点モード対応）の出題取得API
 app.get('/api/questions', async (req, res) => {
   try {
-    const { category, limit } = req.query;
+    const { category, limit, mode } = req.query;
     let count = parseInt(limit, 10) || 10;
     if (isNaN(count) || count < 1) count = 10;
     if (count > 100) count = 100;
+
+    const username = getOptionalUsername(req) || 'GUEST';
+
+    // ソート順の構築:
+    // mode === 'weakness' (弱点克服モード) : 不正解(0)を最優先 -> 古い問題順 -> ランダム
+    // デフォルト : 未回答(0)を最優先 -> 回答日時が古い順(直近回答を回避) -> ランダム
+    let orderClause = "";
+    if (mode === 'weakness') {
+      orderClause = `
+        ORDER BY 
+          CASE WHEN ua.is_correct = 0 THEN 0 ELSE 1 END,
+          ua.answered_at ASC NULLS FIRST,
+          RANDOM()
+      `;
+    } else {
+      orderClause = `
+        ORDER BY 
+          CASE WHEN ua.question_id IS NULL THEN 0 ELSE 1 END,
+          ua.answered_at ASC NULLS FIRST,
+          RANDOM()
+      `;
+    }
 
     let questions = [];
 
@@ -213,23 +276,32 @@ app.get('/api/questions', async (req, res) => {
       ];
 
       for (const target of targets) {
-        const qList = await pool.query(`
-          SELECT id, category, question_text, option1, option2, option3, option4, image_url 
-          FROM questions WHERE category LIKE $1 ORDER BY RANDOM() LIMIT $2
-        `, [`%${target.key}%`, target.limit]);
+        const sql = `
+          SELECT q.id, q.category, q.question_text, q.option1, q.option2, q.option3, q.option4, q.image_url 
+          FROM questions q
+          LEFT JOIN user_answers ua ON q.id = ua.question_id AND ua.user_id = $1
+          WHERE q.category LIKE $2
+          ${orderClause}
+          LIMIT $3
+        `;
+        const qList = await pool.query(sql, [username, `%${target.key}%`, target.limit]);
         questions.push(...qList.rows);
       }
 
       const currentFetchedIds = questions.map(q => q.id);
       if (currentFetchedIds.length < 100) {
-        let fallbackSql = `SELECT id, category, question_text, option1, option2, option3, option4, image_url FROM questions`;
-        const params = [];
+        let fallbackSql = `
+          SELECT q.id, q.category, q.question_text, q.option1, q.option2, q.option3, q.option4, q.image_url 
+          FROM questions q
+          LEFT JOIN user_answers ua ON q.id = ua.question_id AND ua.user_id = $1
+        `;
+        const params = [username];
 
         if (currentFetchedIds.length > 0) {
-          fallbackSql += ` WHERE id NOT IN (${currentFetchedIds.map((_, i) => `$${i + 1}`).join(',')})`;
+          fallbackSql += ` WHERE q.id NOT IN (${currentFetchedIds.map((_, i) => `$${i + 2}`).join(',')})`;
           params.push(...currentFetchedIds);
         }
-        fallbackSql += ` ORDER BY RANDOM() LIMIT $${params.length + 1}`;
+        fallbackSql += ` ${orderClause} LIMIT $${params.length + 1}`;
         params.push(100 - currentFetchedIds.length);
 
         const extraQuestions = await pool.query(fallbackSql, params);
@@ -239,16 +311,25 @@ app.get('/api/questions', async (req, res) => {
       questions.sort(() => Math.random() - 0.5);
 
     } else if (!category || category === 'all') {
-      const result = await pool.query(`
-        SELECT id, category, question_text, option1, option2, option3, option4, image_url 
-        FROM questions ORDER BY RANDOM() LIMIT $1
-      `, [count]);
+      const sql = `
+        SELECT q.id, q.category, q.question_text, q.option1, q.option2, q.option3, q.option4, q.image_url 
+        FROM questions q
+        LEFT JOIN user_answers ua ON q.id = ua.question_id AND ua.user_id = $1
+        ${orderClause}
+        LIMIT $2
+      `;
+      const result = await pool.query(sql, [username, count]);
       questions = result.rows;
     } else {
-      const result = await pool.query(`
-        SELECT id, category, question_text, option1, option2, option3, option4, image_url 
-        FROM questions WHERE category = $1 ORDER BY RANDOM() LIMIT $2
-      `, [String(category).substring(0, 50), count]);
+      const sql = `
+        SELECT q.id, q.category, q.question_text, q.option1, q.option2, q.option3, q.option4, q.image_url 
+        FROM questions q
+        LEFT JOIN user_answers ua ON q.id = ua.question_id AND ua.user_id = $1
+        WHERE q.category = $2
+        ${orderClause}
+        LIMIT $3
+      `;
+      const result = await pool.query(sql, [username, String(category).substring(0, 50), count]);
       questions = result.rows;
     }
 
@@ -259,7 +340,7 @@ app.get('/api/questions', async (req, res) => {
   }
 });
 
-// 解答送信 & 採点 (バルク更新適用・超高速化)
+// 解答送信 & 採点 (ユーザーの正誤状態・最終回答日時をバルク更新)
 app.post('/api/submit', strictLimiter, authenticateToken, async (req, res) => {
   const client = await pool.connect();
   try {
@@ -275,7 +356,7 @@ app.post('/api/submit', strictLimiter, authenticateToken, async (req, res) => {
       return res.status(400).json({ error: "不正な問題IDが含まれています。" });
     }
 
-    const userAnswers = (typeof answers === 'object' && answers !== null) ? answers : {};
+    const userAnswersMap = (typeof answers === 'object' && answers !== null) ? answers : {};
 
     const placeholders = validQuestionIds.map((_, i) => `$${i + 1}`).join(',');
     const allQuestionsRes = await client.query(`
@@ -299,10 +380,10 @@ app.post('/api/submit', strictLimiter, authenticateToken, async (req, res) => {
     const details = [];
 
     const updateQuestions = [];
-    const insertUserAnswers = [];
+    const upsertUserAnswers = [];
 
     for (const q of allQuestions) {
-      const userAnswer = userAnswers[q.id];
+      const userAnswer = userAnswersMap[q.id];
       const isCorrect = (userAnswer !== undefined && Number(userAnswer) === Number(q.correct_option)) ? 1 : 0;
       if (isCorrect) correctCount++;
 
@@ -329,9 +410,13 @@ app.post('/api/submit', strictLimiter, authenticateToken, async (req, res) => {
           correct_count: currentCorrectCount,
           difficulty: newDifficulty
         });
-
-        insertUserAnswers.push(q.id);
       }
+
+      // ユーザーごとの解答履歴ログ用データ（正否・日時を更新）
+      upsertUserAnswers.push({
+        question_id: q.id,
+        is_correct: isCorrect
+      });
 
       details.push({
         id: q.id,
@@ -348,7 +433,7 @@ app.post('/api/submit', strictLimiter, authenticateToken, async (req, res) => {
       });
     }
 
-    // ★ バルク1: questions 一括更新（unnest）
+    // ★ バルク1: questions 一括更新
     if (updateQuestions.length > 0) {
       const qIds = updateQuestions.map(u => u.id);
       const qAC = updateQuestions.map(u => u.answer_count);
@@ -366,14 +451,18 @@ app.post('/api/submit', strictLimiter, authenticateToken, async (req, res) => {
       `, [qIds, qAC, qCC, qDiff]);
     }
 
-    // ★ バルク2: user_answers 一括挿入（unnest）
-    if (insertUserAnswers.length > 0) {
-      const uUsers = insertUserAnswers.map(() => authUserId);
+    // ★ バルク2: user_answers 一括挿入・更新 (UPSERT)
+    if (upsertUserAnswers.length > 0) {
+      const uUsers = upsertUserAnswers.map(() => authUserId);
+      const uQIds = upsertUserAnswers.map(u => u.question_id);
+      const uCorrects = upsertUserAnswers.map(u => u.is_correct);
+
       await client.query(`
-        INSERT INTO user_answers (user_id, question_id)
-        SELECT * FROM unnest($1::varchar[], $2::int[])
-        ON CONFLICT DO NOTHING
-      `, [uUsers, insertUserAnswers]);
+        INSERT INTO user_answers (user_id, question_id, is_correct, answered_at)
+        SELECT u, q, c, CURRENT_TIMESTAMP FROM unnest($1::varchar[], $2::int[], $3::int[]) AS t(u, q, c)
+        ON CONFLICT (user_id, question_id) 
+        DO UPDATE SET is_correct = EXCLUDED.is_correct, answered_at = CURRENT_TIMESTAMP
+      `, [uUsers, uQIds, uCorrects]);
     }
 
     const totalCount = allQuestions.length;
@@ -407,6 +496,58 @@ app.post('/api/submit', strictLimiter, authenticateToken, async (req, res) => {
     res.status(500).json({ error: "採点処理中にエラーが発生しました。" });
   } finally {
     client.release();
+  }
+});
+
+// ★ 【改善②】弱点分析 API エンドポイント
+app.get('/api/analytics', authenticateToken, async (req, res) => {
+  try {
+    const authUserId = req.user.username;
+
+    // 分野ごとの正答率・解答数の集計
+    const categoryStats = await pool.query(`
+      SELECT 
+        COALESCE(q.category, '全般') as category,
+        COUNT(ua.question_id)::int as total_answered,
+        SUM(CASE WHEN ua.is_correct = 1 THEN 1 ELSE 0 END)::int as correct_count,
+        ROUND(
+          (SUM(CASE WHEN ua.is_correct = 1 THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(ua.question_id), 0)) * 100, 1
+        )::float as accuracy
+      FROM user_answers ua
+      JOIN questions q ON ua.question_id = q.id
+      WHERE ua.user_id = $1
+      GROUP BY q.category
+      ORDER BY accuracy ASC
+    `, [authUserId]);
+
+    // 全体集計
+    const overallStats = await pool.query(`
+      SELECT 
+        COUNT(ua.question_id)::int as total_answered,
+        SUM(CASE WHEN ua.is_correct = 1 THEN 1 ELSE 0 END)::int as total_correct
+      FROM user_answers ua
+      WHERE ua.user_id = $1
+    `, [authUserId]);
+
+    const totalAns = overallStats.rows[0]?.total_answered || 0;
+    const totalCorr = overallStats.rows[0]?.total_correct || 0;
+    const overallAccuracy = totalAns > 0 ? Number(((totalCorr / totalAns) * 100).toFixed(1)) : 0;
+
+    const weakest = categoryStats.rows.length > 0 ? categoryStats.rows[0] : null;
+
+    res.json({
+      overall: {
+        totalAnswered: totalAns,
+        totalCorrect: totalCorr,
+        accuracy: overallAccuracy
+      },
+      categories: categoryStats.rows,
+      weakestCategory: weakest ? weakest.category : null,
+      weakestAccuracy: weakest ? weakest.accuracy : 0
+    });
+  } catch (err) {
+    logger.error("弱点分析取得エラー", { error: err.message });
+    res.status(500).json({ error: "弱点分析データの取得に失敗しました。" });
   }
 });
 
