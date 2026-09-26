@@ -1,4 +1,3 @@
-```javascript
 require('dotenv').config();
 
 const express = require('express');
@@ -143,56 +142,56 @@ async function timedQuery(executor, sql, params = [], label = 'DB') {
 // ============================================================
 
 async function initDb() {
+  const schemaSql = [
+    'CREATE TABLE IF NOT EXISTS users (',
+    '  id SERIAL PRIMARY KEY,',
+    '  username VARCHAR(50) UNIQUE NOT NULL,',
+    '  password_hash VARCHAR(255) NOT NULL,',
+    '  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP',
+    ');',
+
+    'CREATE TABLE IF NOT EXISTS user_answers (',
+    '  user_id VARCHAR(50) NOT NULL,',
+    '  question_id INT NOT NULL,',
+    '  is_correct INT DEFAULT 0,',
+    '  answered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,',
+    '  PRIMARY KEY (user_id, question_id)',
+    ');',
+
+    'CREATE TABLE IF NOT EXISTS results (',
+    '  id SERIAL PRIMARY KEY,',
+    '  user_id VARCHAR(50) NOT NULL,',
+    '  score INT NOT NULL,',
+    '  max_score INT NOT NULL,',
+    '  category VARCHAR(100),',
+    '  correct_count INT NOT NULL,',
+    '  total_count INT NOT NULL,',
+    '  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP',
+    ');',
+
+    'ALTER TABLE user_answers ADD COLUMN IF NOT EXISTS is_correct INT DEFAULT 0;',
+    'ALTER TABLE user_answers ADD COLUMN IF NOT EXISTS answered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;',
+
+    'CREATE INDEX IF NOT EXISTS idx_results_user_id_id',
+    'ON results (user_id, id DESC);'
+  ].join('\n');
+
   try {
     await timedQuery(
       pool,
-      `
-        CREATE TABLE IF NOT EXISTS users (
-          id SERIAL PRIMARY KEY,
-          username VARCHAR(50) UNIQUE NOT NULL,
-          password_hash VARCHAR(255) NOT NULL,
-          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-
-        CREATE TABLE IF NOT EXISTS user_answers (
-          user_id VARCHAR(50) NOT NULL,
-          question_id INT NOT NULL,
-          is_correct INT DEFAULT 0,
-          answered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-          PRIMARY KEY (user_id, question_id)
-        );
-
-        CREATE TABLE IF NOT EXISTS results (
-          id SERIAL PRIMARY KEY,
-          user_id VARCHAR(50) NOT NULL,
-          score INT NOT NULL,
-          max_score INT NOT NULL,
-          category VARCHAR(100),
-          correct_count INT NOT NULL,
-          total_count INT NOT NULL,
-          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-
-        ALTER TABLE user_answers
-          ADD COLUMN IF NOT EXISTS is_correct INT DEFAULT 0;
-
-        ALTER TABLE user_answers
-          ADD COLUMN IF NOT EXISTS answered_at TIMESTAMP
-          DEFAULT CURRENT_TIMESTAMP;
-
-        CREATE INDEX IF NOT EXISTS idx_results_user_id_id
-          ON results (user_id, id DESC);
-      `,
+      schemaSql,
       [],
       'initDb'
     );
 
-    logger.info("DBスキーマ初期化完了");
+    logger.info('DBスキーマ初期化完了');
 
   } catch (err) {
     logger.error(
-      "DB初期化失敗のため停止します",
-      { error: err.message }
+      'DB初期化失敗のため停止します',
+      {
+        error: err.message
+      }
     );
 
     process.exit(1);
@@ -3197,4 +3196,3 @@ startServer().catch(
     process.exit(1);
   }
 );
-```
