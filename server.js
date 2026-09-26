@@ -386,29 +386,29 @@ app.post('/api/submit', strictLimiter, authenticateToken, async (req, res) => {
 
       const isFirstTime = !answeredSet.has(q.id);
 
-      if (isFirstTime) {
-        const currentAnswerCount = (q.answer_count || 0) + 1;
-        const currentCorrectCount = (q.correct_count || 0) + isCorrect;
-        let newDifficulty = q.difficulty || 0.0;
+      // 全解答のカウントと難易度更新
+      const currentAnswerCount = (q.answer_count || 0) + 1;
+      const currentCorrectCount = (q.correct_count || 0) + isCorrect;
+      let newDifficulty = q.difficulty || 0.0;
 
-        if (currentAnswerCount > 10) {
-          const p = (currentCorrectCount + 1) / (currentAnswerCount + 2);
-          const pAdjusted = Math.max(0.01, (p - 0.25) / (1 - 0.25));
-          const calculatedDifficulty = -Math.log(pAdjusted / (1 - pAdjusted)) / 1.7;
+      if (currentAnswerCount > 5) {
+        const p = (currentCorrectCount + 1) / (currentAnswerCount + 2);
+        const pAdjusted = Math.max(0.01, (p - 0.25) / (1 - 0.25));
+        const calculatedDifficulty = -Math.log(pAdjusted / (1 - pAdjusted)) / 1.7;
 
-          const alpha = 0.1;
-          const oldDifficulty = q.difficulty || 0.0;
-          newDifficulty = (1 - alpha) * oldDifficulty + alpha * calculatedDifficulty;
-          newDifficulty = Math.max(-3.0, Math.min(3.0, newDifficulty));
-        }
-
-        updateQuestions.push({
-          id: q.id,
-          answer_count: currentAnswerCount,
-          correct_count: currentCorrectCount,
-          difficulty: newDifficulty
-        });
+        // 初回は alpha = 0.1、復習は alpha = 0.02
+        const alpha = isFirstTime ? 0.1 : 0.02;
+        const oldDifficulty = q.difficulty || 0.0;
+        newDifficulty = (1 - alpha) * oldDifficulty + alpha * calculatedDifficulty;
+        newDifficulty = Math.max(-3.0, Math.min(3.0, newDifficulty));
       }
+
+      updateQuestions.push({
+        id: q.id,
+        answer_count: currentAnswerCount,
+        correct_count: currentCorrectCount,
+        difficulty: newDifficulty
+      });
 
       upsertUserAnswers.push({
         question_id: q.id,
@@ -496,7 +496,6 @@ app.post('/api/submit', strictLimiter, authenticateToken, async (req, res) => {
 
 // ==================== ★ CAT（適応型テスト）専用 API ====================
 
-// CAT開始 API: 1問目取得（strictLimiterを適用）
 app.post('/api/cat/start', strictLimiter, async (req, res) => {
   try {
     const { category } = req.body;
@@ -533,7 +532,6 @@ app.post('/api/cat/start', strictLimiter, async (req, res) => {
   }
 });
 
-// CAT解答 ＆ 次問題取得 API (一問一答型)
 app.post('/api/cat/answer', authenticateToken, async (req, res) => {
   const client = await pool.connect();
   try {
@@ -564,26 +562,26 @@ app.post('/api/cat/answer', authenticateToken, async (req, res) => {
 
     const isFirstTime = (answeredCheck.rows.length === 0);
 
-    if (isFirstTime) {
-      const currentAnswerCount = (currentQ.answer_count || 0) + 1;
-      const currentCorrectCount = (currentQ.correct_count || 0) + isCorrect;
-      let newDifficulty = currentQ.difficulty || 0.0;
+    // 全解答でのカウントアップ
+    const currentAnswerCount = (currentQ.answer_count || 0) + 1;
+    const currentCorrectCount = (currentQ.correct_count || 0) + isCorrect;
+    let newDifficulty = currentQ.difficulty || 0.0;
 
-      if (currentAnswerCount > 10) {
-        const p = (currentCorrectCount + 1) / (currentAnswerCount + 2);
-        const pAdjusted = Math.max(0.01, (p - 0.25) / (1 - 0.25));
-        const calculatedDifficulty = -Math.log(pAdjusted / (1 - pAdjusted)) / 1.7;
+    if (currentAnswerCount > 5) {
+      const p = (currentCorrectCount + 1) / (currentAnswerCount + 2);
+      const pAdjusted = Math.max(0.01, (p - 0.25) / (1 - 0.25));
+      const calculatedDifficulty = -Math.log(pAdjusted / (1 - pAdjusted)) / 1.7;
 
-        const alpha = 0.1;
-        const oldDifficulty = currentQ.difficulty || 0.0;
-        newDifficulty = (1 - alpha) * oldDifficulty + alpha * calculatedDifficulty;
-        newDifficulty = Math.max(-3.0, Math.min(3.0, newDifficulty));
-      }
-
-      await client.query(`
-        UPDATE questions SET answer_count = $1, correct_count = $2, difficulty = $3 WHERE id = $4
-      `, [currentAnswerCount, currentCorrectCount, newDifficulty, currentQ.id]);
+      // 初回なら alpha = 0.1、復習なら alpha = 0.02
+      const alpha = isFirstTime ? 0.1 : 0.02;
+      const oldDifficulty = currentQ.difficulty || 0.0;
+      newDifficulty = (1 - alpha) * oldDifficulty + alpha * calculatedDifficulty;
+      newDifficulty = Math.max(-3.0, Math.min(3.0, newDifficulty));
     }
+
+    await client.query(`
+      UPDATE questions SET answer_count = $1, correct_count = $2, difficulty = $3 WHERE id = $4
+    `, [currentAnswerCount, currentCorrectCount, newDifficulty, currentQ.id]);
 
     await client.query(`
       INSERT INTO user_answers (user_id, question_id, is_correct, answered_at)
@@ -736,7 +734,6 @@ app.get('/api/analytics', authenticateToken, async (req, res) => {
     const totalCorr = overallStats.rows[0]?.total_correct || 0;
     const overallAccuracy = totalAns > 0 ? Number(((totalCorr / totalAns) * 100).toFixed(1)) : 0;
 
-    // 最低5問以上回答している分野の中から最弱点を特定（サンプル不足による誤判定防止）
     const qualifiedWeak = categoryStats.rows.find(c => c.total_answered >= 5);
     const weakest = qualifiedWeak || (categoryStats.rows.length > 0 ? categoryStats.rows[0] : null);
 
@@ -760,7 +757,6 @@ app.get('/api/history', authenticateToken, async (req, res) => {
   try {
     const authUserId = req.user.username;
 
-    // 最新の受験結果が最上部に来るよう DESC で取得
     const history = await pool.query(`
       SELECT 
         id, user_id, score, max_score, category, correct_count, total_count, 
@@ -775,7 +771,7 @@ app.get('/api/history', authenticateToken, async (req, res) => {
   }
 });
 
-// IRT採点ロジック (EAP法 + 3PLモデルベースのアプリ独自推定)
+// IRT採点ロジック
 function calculateIRTScore(responses, questions) {
   const numNodes = 81;
   const nodes = [];
@@ -813,20 +809,17 @@ function calculateIRTScore(responses, questions) {
     thetaEAP += nodes[j] * posteriors[j];
   }
 
-  // アプリ独自のIRT風スコア換算 (公式ITパスポートの得点換算表とは異なります)
   let rawScore = Math.round(600 + thetaEAP * 150);
   let scaledScore = Math.max(100, Math.min(1000, rawScore));
 
   return { theta: Number(thetaEAP.toFixed(3)), score: scaledScore };
 }
 
-// エラーハンドリングミドルウェア
 app.use((err, req, res, next) => {
   logger.error('Unhandled API Error', { error: err.message, stack: err.stack });
   res.status(500).json({ error: "内部サーバーエラーが発生しました。" });
 });
 
-// --- サーバー起動ロジック（DB初期化を確実にしてから起動） ---
 async function startServer() {
   await initDb();
 
