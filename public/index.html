@@ -4,9 +4,10 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>IT模擬試験</title>
-  <!-- DOMPurify CDN & Chart.js -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.6/purify.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <meta name="description" content="ITパスポート学習向けのオンライン模擬試験・成績分析アプリ">
+  <meta name="referrer" content="strict-origin-when-cross-origin">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.6/purify.min.js" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.0/dist/chart.umd.min.js" defer></script>
   <style>
     :root {
       --primary-color: #0066cc;
@@ -313,6 +314,12 @@
     }
     .status-badge.correct { background: #d4edda; color: #155724; }
     .status-badge.incorrect { background: #f8d7da; color: #721c24; }
+    .btn:focus-visible,
+    .q-btn:focus-visible,
+    .option-item:has(input:focus-visible) {
+      outline: 3px solid rgba(0, 102, 204, 0.35);
+      outline-offset: 2px;
+    }
     .explanation-box {
       background: #eef7ff;
       border-left: 4px solid var(--primary-color);
@@ -333,12 +340,12 @@
       <div class="auth-card">
         <h2 id="auth-title" style="text-align: center;">ログイン</h2>
         <div class="form-group">
-          <label>ユーザー名 (英数字 3〜20文字)</label>
-          <input type="text" id="auth-username" class="input-box" style="max-width: 100%;">
+          <label for="auth-username">ユーザー名 (英数字 3〜20文字)</label>
+          <input type="text" id="auth-username" class="input-box" style="max-width: 100%;" autocomplete="username" autocapitalize="none" spellcheck="false">
         </div>
         <div class="form-group">
-          <label>パスワード (6文字以上)</label>
-          <input type="password" id="auth-password" class="input-box" style="max-width: 100%;">
+          <label for="auth-password">パスワード (6文字以上)</label>
+          <input type="password" id="auth-password" class="input-box" style="max-width: 100%;" autocomplete="current-password">
         </div>
         <div style="margin-top: 20px; display: flex; flex-direction: column; gap: 10px;">
           <button class="btn btn-primary" id="auth-submit-btn" onclick="handleAuth()">ログイン</button>
@@ -367,9 +374,9 @@
         <div class="form-group">
           <label for="mode-select">🎯 出題優先モード</label>
           <select id="mode-select" class="select-box" style="max-width: 100%;" onchange="onModeChange()">
-            <option value="standard" selected>✨ 未回答優先 ＋ 直近回答回避（標準）</option>
+            <option value="standard" selected="">✨ 未回答優先 ＋ 直近回答回避（標準）</option>
             <option value="weakness">🔥 弱点・苦手克服（誤答・未回答を優先）</option>
-            <option value="cat">🤖 AIスピード判定テスト（CAT・全20問）</option>
+            <option value="cat">🎯 CAT適応型能力テスト（全20問）</option>
           </select>
         </div>
 
@@ -383,7 +390,7 @@
         <div class="form-group" id="count-group">
           <label for="count-select">■ 出題数</label>
           <select id="count-select" class="select-box" style="max-width: 100%;">
-            <option value="10" selected>10問</option>
+            <option value="10" selected="">10問</option>
             <option value="20">20問</option>
             <option value="30">30問</option>
             <option value="50">50問</option>
@@ -396,7 +403,7 @@
           <select id="timer-select" class="select-box" style="max-width: 100%;">
             <option value="0">制限時間なし</option>
             <option value="300">5分</option>
-            <option value="600" selected>10分</option>
+            <option value="600" selected="">10分</option>
             <option value="1800">30分</option>
             <option value="3600">60分</option>
           </select>
@@ -535,10 +542,15 @@
     let selectedCategory = 'all';
     let historyChartInstance = null;
     let radarChartInstance = null;
+    let lastExamStateSaveAt = 0;
+    let isSubmitting = false;
+
+    const EXAM_STATE_SAVE_INTERVAL_MS = 5000;
+    const EXAM_STATE_MAX_AGE_MS = 48 * 60 * 60 * 1000;
 
     // ★ CAT（適応型テスト）専用状態変数
     let isCatMode = false;
-    let catCurrentStep = 1;
+    let catStep = 1;
     let catTotalSteps = 20;
     let catHistory = [];
     let catCurrentQuestion = null;
@@ -556,22 +568,31 @@
 
     function sanitizeHtml(dirty) {
       if (typeof DOMPurify !== 'undefined') {
-        return DOMPurify.sanitize(dirty, {
+        return DOMPurify.sanitize(String(dirty ?? ''), {
           ADD_TAGS: ['pre', 'code', 'img'],
-          ADD_ATTR: ['src', 'alt', 'class', 'style']
+          ADD_ATTR: ['src', 'alt', 'class']
         });
       }
       const div = document.createElement('div');
-      div.textContent = dirty;
+      div.textContent = String(dirty ?? '');
       return div.innerHTML;
     }
 
-    async function fetchWithAuth(url, options = {}) {
-      options.headers = options.headers || {};
-      if (authToken) {
-        options.headers['Authorization'] = `Bearer ${authToken}`;
+    function getSafeImageUrl(rawUrl) {
+      if (!rawUrl || typeof rawUrl !== 'string') return null;
+      try {
+        const url = new URL(rawUrl.trim(), window.location.origin);
+        if (!['http:', 'https:'].includes(url.protocol)) return null;
+        return url.href;
+      } catch {
+        return null;
       }
-      const res = await fetch(url, options);
+    }
+
+    async function fetchWithAuth(url, options = {}) {
+      const headers = new Headers(options.headers || {});
+      if (authToken) headers.set('Authorization', `Bearer ${authToken}`);
+      const res = await fetch(url, { ...options, headers });
       if (res.status === 401 || res.status === 403) {
         logout();
         throw new Error("認証エラーが発生しました。再ログインしてください。");
@@ -586,13 +607,15 @@
           if (res.ok) {
             const data = await res.json();
             currentUsername = data.username;
-            showStartScreen();
+            await showStartScreen();
             return;
           }
         } catch (e) { console.warn("認証チェック失敗"); }
       }
       showAuthScreen();
     };
+
+    window.addEventListener('pagehide', () => saveExamState(true));
 
     function onModeChange() {
       const mode = document.getElementById('mode-select').value;
@@ -682,53 +705,102 @@
       } catch (err) {}
     }
 
-    function saveExamState() {
-      if (isCatMode || questions.length === 0) return;
-      const state = {
-        username: currentUsername,
-        questions, userAnswers, reviewFlags, currentIndex,
-        remainingSeconds, selectedCategory, timestamp: Date.now()
-      };
-      localStorage.setItem(`exam_state_${currentUsername}`, JSON.stringify(state));
-    }
+    function getSavedExamState() {
+      if (!currentUsername) return null;
+      const key = `exam_state_${currentUsername}`;
+      const saved = localStorage.getItem(key);
+      if (!saved) return null;
 
-    function checkSavedExamState() {
-      const saved = localStorage.getItem(`exam_state_${currentUsername}`);
-      if (saved) {
-        document.getElementById('resume-banner').style.display = 'flex';
-      } else {
-        document.getElementById('resume-banner').style.display = 'none';
+      try {
+        const state = JSON.parse(saved);
+        const savedAt = Number(state?.timestamp || 0);
+        if (!state || state.username !== currentUsername || !Array.isArray(state.questions) || state.questions.length === 0) {
+          throw new Error('保存データの形式が不正です。');
+        }
+        if (savedAt > 0 && Date.now() - savedAt > EXAM_STATE_MAX_AGE_MS) {
+          throw new Error('保存データの有効期限が切れています。');
+        }
+        return state;
+      } catch (err) {
+        console.warn('保存された試験データを削除します:', err.message);
+        localStorage.removeItem(key);
+        return null;
       }
     }
 
+    function saveExamState(force = false) {
+      if (isCatMode || questions.length === 0 || !currentUsername) return;
+      const now = Date.now();
+      if (!force && now - lastExamStateSaveAt < EXAM_STATE_SAVE_INTERVAL_MS) return;
+
+      const state = {
+        username: currentUsername,
+        questions,
+        userAnswers,
+        reviewFlags,
+        currentIndex,
+        remainingSeconds,
+        timerEnabled: remainingSeconds > 0,
+        selectedCategory,
+        timestamp: now
+      };
+
+      try {
+        localStorage.setItem(`exam_state_${currentUsername}`, JSON.stringify(state));
+        lastExamStateSaveAt = now;
+      } catch (err) {
+        console.warn('試験状態の保存に失敗しました。', err);
+      }
+    }
+
+    function checkSavedExamState() {
+      const banner = document.getElementById('resume-banner');
+      banner.style.display = getSavedExamState() ? 'flex' : 'none';
+    }
+
     function restoreExamState() {
-      const saved = localStorage.getItem(`exam_state_${currentUsername}`);
-      if (!saved) return;
+      const state = getSavedExamState();
+      if (!state) {
+        checkSavedExamState();
+        return;
+      }
 
       isCatMode = false;
-      const state = JSON.parse(saved);
       questions = state.questions;
-      userAnswers = state.userAnswers;
-      reviewFlags = state.reviewFlags;
-      currentIndex = state.currentIndex;
-      remainingSeconds = state.remainingSeconds;
-      selectedCategory = state.selectedCategory;
+      userAnswers = state.userAnswers && typeof state.userAnswers === 'object' ? state.userAnswers : {};
+      reviewFlags = state.reviewFlags && typeof state.reviewFlags === 'object' ? state.reviewFlags : {};
+      currentIndex = Math.min(Math.max(Number(state.currentIndex) || 0, 0), questions.length - 1);
+      remainingSeconds = Math.max(Number(state.remainingSeconds) || 0, 0);
+      selectedCategory = state.selectedCategory || 'all';
 
+      if (state.timerEnabled && state.timestamp) {
+        const elapsedSeconds = Math.floor((Date.now() - Number(state.timestamp)) / 1000);
+        remainingSeconds = Math.max(0, remainingSeconds - Math.max(0, elapsedSeconds));
+      }
+
+      lastExamStateSaveAt = 0;
       setupUIForMode(false);
       switchScreen('quiz-screen');
-
       document.getElementById('display-user-id').textContent = currentUsername;
       document.getElementById('total-count').textContent = questions.length;
 
       renderNavGrid();
       showQuestion(currentIndex);
 
-      if (remainingSeconds > 0) startTimer();
+      if (remainingSeconds > 0) {
+        startTimer();
+      } else {
+        document.getElementById('timer-display').textContent = '制限時間: なし';
+        document.getElementById('timer-display').classList.remove('warning');
+      }
     }
 
     function clearExamState() {
+      if (!currentUsername) return;
       localStorage.removeItem(`exam_state_${currentUsername}`);
-      document.getElementById('resume-banner').style.display = 'none';
+      lastExamStateSaveAt = 0;
+      const banner = document.getElementById('resume-banner');
+      if (banner) banner.style.display = 'none';
     }
 
     function setupUIForMode(isCat) {
@@ -784,7 +856,9 @@
 
       try {
         const res = await fetchWithAuth(`/api/questions?category=${encodeURIComponent(selectedCategory)}&limit=${questionCount}&mode=${mode}`);
-        questions = await res.json();
+        if (!res.ok) throw new Error(`questions request failed: ${res.status}`);
+        const data = await res.json();
+        questions = Array.isArray(data) ? data : [];
 
         if (questions.length === 0) {
           alert("該当する問題が存在しません。");
@@ -807,9 +881,10 @@
           document.getElementById('timer-display').textContent = '制限時間: なし';
         }
 
-        saveExamState();
+        saveExamState(true);
 
       } catch (err) {
+        console.error('問題データ取得失敗', err);
         alert("問題データの取得に失敗しました。");
       }
     }
@@ -818,7 +893,7 @@
     async function startCatQuiz() {
       try {
         if (timerInterval) clearInterval(timerInterval);
-        document.getElementById('timer-display').textContent = 'AI適応テスト実行中';
+        document.getElementById('timer-display').textContent = 'CAT適応テスト実行中';
 
         const res = await fetchWithAuth('/api/cat/start', {
           method: 'POST',
@@ -832,8 +907,8 @@
           return;
         }
 
-        catStep = data.step;
-        catTotalSteps = data.totalSteps;
+        catStep = Number(data.step) || 1;
+        catTotalSteps = Number(data.totalSteps) || 20;
         catHistory = [];
         catCurrentQuestion = data.question;
         catSelectedAnswer = null;
@@ -853,38 +928,47 @@
     function renderCatQuestion() {
       catSelectedAnswer = null;
       const q = catCurrentQuestion;
+      if (!q) return;
 
       document.getElementById('answered-count').textContent = catStep;
       document.getElementById('total-count').textContent = catTotalSteps;
-      document.getElementById('progress-bar').style.width = `${(catStep / catTotalSteps) * 100}%`;
-
-      document.getElementById('q-category').textContent = q.category || "全般";
+      document.getElementById('progress-bar').style.width = `${Math.min(100, (catStep / catTotalSteps) * 100)}%`;
+      document.getElementById('q-category').textContent = q.category || '全般';
 
       let qTitleHtml = `<strong>問 ${catStep} / ${catTotalSteps}.</strong><br>${sanitizeHtml(q.question_text)}`;
-
-      if (q.image_url && q.image_url.trim() !== '') {
-        const safeUrl = sanitizeHtml(q.image_url.trim());
+      const safeImageUrl = getSafeImageUrl(q.image_url);
+      if (safeImageUrl) {
         qTitleHtml += `
           <div class="question-image-container">
-            <img src="${safeUrl}" class="question-image" alt="問題画像" onerror="this.style.display='none'">
+            <img src="${sanitizeHtml(safeImageUrl)}" class="question-image" alt="問題画像" loading="lazy">
           </div>
         `;
       }
 
       document.getElementById('q-title').innerHTML = qTitleHtml;
+      renderOptions(getShuffledOptions(q), 'cat-option', optNum => selectCatOption(optNum));
+    }
 
-      const optionsContainer = document.getElementById('q-options');
-      optionsContainer.innerHTML = '';
+    function renderOptions(options, inputName, onSelect) {
+      const container = document.getElementById('q-options');
+      container.innerHTML = '';
+      const fragment = document.createDocumentFragment();
 
-      const options = getShuffledOptions(q);
       options.forEach(opt => {
-        optionsContainer.innerHTML += `
-          <label class="option-item">
-            <input type="radio" name="cat-option" value="${opt.num}" onchange="selectCatOption(${opt.num})">
-            <span>${sanitizeHtml(opt.text)}</span>
-          </label>
-        `;
+        const label = document.createElement('label');
+        label.className = 'option-item';
+        const input = document.createElement('input');
+        input.type = 'radio';
+        input.name = inputName;
+        input.value = String(opt.num);
+        input.addEventListener('change', () => onSelect(opt.num));
+        const span = document.createElement('span');
+        span.innerHTML = sanitizeHtml(opt.text);
+        label.append(input, span);
+        fragment.appendChild(label);
       });
+
+      container.appendChild(fragment);
     }
 
     function selectCatOption(optionNum) {
@@ -921,8 +1005,8 @@
           renderResultScreenFromCat(data);
         } else {
           // 次の問へ進行
-          catStep = data.step;
-          catHistory = data.history;
+          catStep = Number(data.step) || (catStep + 1);
+          catHistory = Array.isArray(data.history) ? data.history : catHistory;
           catCurrentQuestion = data.question;
           renderCatQuestion();
         }
@@ -1007,10 +1091,12 @@
     }
 
     function getShuffledOptions(q) {
-      if (!q.shuffledOptions) {
+      if (!Array.isArray(q.shuffledOptions)) {
         const original = [
-          { num: 1, text: q.option1 }, { num: 2, text: q.option2 },
-          { num: 3, text: q.option3 }, { num: 4, text: q.option4 }
+          { num: 1, text: q.option1 },
+          { num: 2, text: q.option2 },
+          { num: 3, text: q.option3 },
+          { num: 4, text: q.option4 }
         ];
         q.shuffledOptions = [...original].sort(() => Math.random() - 0.5);
       }
@@ -1018,18 +1104,18 @@
     }
 
     function showQuestion(index) {
-      currentIndex = index;
+      if (!questions.length) return;
+      currentIndex = Math.min(Math.max(Number(index) || 0, 0), questions.length - 1);
       const q = questions[currentIndex];
 
-      document.getElementById('q-category').textContent = q.category || "全般";
+      document.getElementById('q-category').textContent = q.category || '全般';
 
       let qTitleHtml = `<strong>問 ${currentIndex + 1}.</strong><br>${sanitizeHtml(q.question_text)}`;
-
-      if (q.image_url && q.image_url.trim() !== '') {
-        const safeUrl = sanitizeHtml(q.image_url.trim());
+      const safeImageUrl = getSafeImageUrl(q.image_url);
+      if (safeImageUrl) {
         qTitleHtml += `
           <div class="question-image-container">
-            <img src="${safeUrl}" class="question-image" alt="問題画像" onerror="this.style.display='none'">
+            <img src="${sanitizeHtml(safeImageUrl)}" class="question-image" alt="問題画像" loading="lazy">
           </div>
         `;
       }
@@ -1037,25 +1123,29 @@
       document.getElementById('q-title').innerHTML = qTitleHtml;
       document.getElementById('review-checkbox').checked = !!reviewFlags[q.id];
 
-      const optionsContainer = document.getElementById('q-options');
-      optionsContainer.innerHTML = '';
-
       const options = getShuffledOptions(q);
-      options.forEach(opt => {
-        const optNum = opt.num;
-        const isChecked = userAnswers[q.id] === optNum ? 'checked' : '';
+      const container = document.getElementById('q-options');
+      container.innerHTML = '';
+      const fragment = document.createDocumentFragment();
 
-        optionsContainer.innerHTML += `
-          <label class="option-item">
-            <input type="radio" name="option" value="${optNum}" ${isChecked} onchange="selectOption(${q.id}, ${optNum})">
-            <span>${sanitizeHtml(opt.text)}</span>
-          </label>
-        `;
+      options.forEach(opt => {
+        const label = document.createElement('label');
+        label.className = 'option-item';
+        const input = document.createElement('input');
+        input.type = 'radio';
+        input.name = 'option';
+        input.value = String(opt.num);
+        input.checked = userAnswers[q.id] === opt.num;
+        input.addEventListener('change', () => selectOption(q.id, opt.num));
+        const span = document.createElement('span');
+        span.innerHTML = sanitizeHtml(opt.text);
+        label.append(input, span);
+        fragment.appendChild(label);
       });
+      container.appendChild(fragment);
 
       document.getElementById('prev-btn').style.visibility = (currentIndex === 0) ? 'hidden' : 'visible';
       document.getElementById('next-btn').style.display = (currentIndex === questions.length - 1) ? 'none' : 'inline-block';
-
       updateUI();
     }
 
@@ -1064,19 +1154,20 @@
       if (!q) return;
       reviewFlags[q.id] = document.getElementById('review-checkbox').checked;
       updateUI();
-      saveExamState();
+      saveExamState(true);
     }
 
     function selectOption(qId, optionNum) {
       userAnswers[qId] = optionNum;
       updateUI();
-      saveExamState();
+      saveExamState(true);
     }
 
     function moveQuestion(step) {
       const newIndex = currentIndex + step;
       if (newIndex >= 0 && newIndex < questions.length) {
         showQuestion(newIndex);
+        saveExamState(true);
       }
     }
 
@@ -1100,17 +1191,28 @@
     function renderNavGrid() {
       const grid = document.getElementById('grid-container');
       grid.innerHTML = '';
+      const fragment = document.createDocumentFragment();
+
       questions.forEach((q, idx) => {
         const btn = document.createElement('button');
         btn.id = `grid-btn-${idx}`;
         btn.className = 'q-btn';
         btn.textContent = idx + 1;
-        btn.onclick = () => showQuestion(idx);
-        grid.appendChild(btn);
+        btn.type = 'button';
+        btn.setAttribute('aria-label', `問 ${idx + 1}へ移動`);
+        btn.addEventListener('click', () => {
+          showQuestion(idx);
+          saveExamState(true);
+        });
+        fragment.appendChild(btn);
       });
+
+      grid.appendChild(fragment);
+      updateUI();
     }
 
     function confirmSubmit() {
+      if (isSubmitting) return;
       const answeredCount = Object.keys(userAnswers).length;
       const unAnsweredCount = questions.length - answeredCount;
 
@@ -1124,6 +1226,8 @@
     }
 
     async function submitAnswers() {
+      if (isSubmitting) return;
+      isSubmitting = true;
       try {
         const questionIds = questions.map(q => q.id);
 
@@ -1200,17 +1304,32 @@
         }
 
       } catch (err) {
+        console.error('採点失敗', err);
         alert("通信エラーまたは採点に失敗しました。");
+      } finally {
+        isSubmitting = false;
       }
     }
 
     async function showHistory() {
       switchScreen('history-screen');
       document.getElementById('history-user-id').textContent = currentUsername;
+      document.getElementById('weakness-text').textContent = '分析データを取得しています...';
 
       try {
-        const analyticsRes = await fetchWithAuth('/api/analytics');
-        const analytics = await analyticsRes.json();
+        const [analyticsRes, historyRes] = await Promise.all([
+          fetchWithAuth('/api/analytics'),
+          fetchWithAuth('/api/history')
+        ]);
+
+        if (!analyticsRes.ok || !historyRes.ok) {
+          throw new Error('履歴データの取得に失敗しました。');
+        }
+
+        const [analytics, history] = await Promise.all([
+          analyticsRes.json(),
+          historyRes.json()
+        ]);
 
         const weaknessText = document.getElementById('weakness-text');
         if (analytics.weakestCategory) {
@@ -1219,13 +1338,12 @@
             全体正答率: <strong>${analytics.overall.accuracy}%</strong> (${analytics.overall.totalCorrect}/${analytics.overall.totalAnswered}問)
           `;
         } else {
-          weaknessText.textContent = "十分な解答データがありません。テストを実施すると分析が表示されます。";
+          weaknessText.textContent = '十分な解答データがありません。テストを実施すると分析が表示されます。';
         }
 
-        if (analytics.categories && analytics.categories.length > 0) {
+        if (analytics.categories && analytics.categories.length > 0 && typeof Chart !== 'undefined') {
           const catLabels = analytics.categories.map(c => c.category);
           const catAccuracies = analytics.categories.map(c => c.accuracy);
-
           const radarCtx = document.getElementById('radarChart').getContext('2d');
           if (radarChartInstance) radarChartInstance.destroy();
 
@@ -1249,59 +1367,64 @@
           });
         }
 
-        const res = await fetchWithAuth('/api/history');
-        const history = await res.json();
-
         const tbody = document.getElementById('history-table-body');
         tbody.innerHTML = '';
 
         if (!Array.isArray(history) || history.length === 0) {
-          tbody.innerHTML = `<tr><td colspan="4">受検履歴がありません。</td></tr>`;
+          tbody.innerHTML = '<tr><td colspan="4">受検履歴がありません。</td></tr>';
+          if (historyChartInstance) {
+            historyChartInstance.destroy();
+            historyChartInstance = null;
+          }
           return;
         }
 
         const labels = [];
         const scores = [];
+        const fragment = document.createDocumentFragment();
 
         history.forEach((row, idx) => {
           labels.push(`${idx + 1}回目 (${row.date})`);
-          scores.push(row.score);
+          scores.push(Number(row.score) || 0);
 
-          tbody.innerHTML += `
-            <tr>
-              <td>${sanitizeHtml(row.date)}</td>
-              <td>${sanitizeHtml(row.category)}</td>
-              <td>${row.correct_count} / ${row.total_count}</td>
-              <td><strong>${row.score}点</strong></td>
-            </tr>
+          const tr = document.createElement('tr');
+          tr.innerHTML = `
+            <td>${sanitizeHtml(row.date)}</td>
+            <td>${sanitizeHtml(row.category)}</td>
+            <td>${Number(row.correct_count) || 0} / ${Number(row.total_count) || 0}</td>
+            <td><strong>${Number(row.score) || 0}点</strong></td>
           `;
+          fragment.appendChild(tr);
         });
+        tbody.appendChild(fragment);
 
-        const ctx = document.getElementById('historyChart').getContext('2d');
-        if (historyChartInstance) historyChartInstance.destroy();
+        if (typeof Chart !== 'undefined') {
+          const ctx = document.getElementById('historyChart').getContext('2d');
+          if (historyChartInstance) historyChartInstance.destroy();
 
-        historyChartInstance = new Chart(ctx, {
-          type: 'line',
-          data: {
-            labels,
-            datasets: [{
-              label: '獲得スコア (1000点満点)',
-              data: scores,
-              borderColor: '#0066cc',
-              backgroundColor: 'rgba(0, 102, 204, 0.1)',
-              fill: true,
-              tension: 0.2
-            }]
-          },
-          options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            scales: { y: { min: 0, max: 1000 } }
-          }
-        });
-
+          historyChartInstance = new Chart(ctx, {
+            type: 'line',
+            data: {
+              labels,
+              datasets: [{
+                label: '獲得スコア (1000点満点)',
+                data: scores,
+                borderColor: '#0066cc',
+                backgroundColor: 'rgba(0, 102, 204, 0.1)',
+                fill: true,
+                tension: 0.2
+              }]
+            },
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              scales: { y: { min: 0, max: 1000 } }
+            }
+          });
+        }
       } catch (err) {
-        console.error("履歴・弱点データ取得失敗", err);
+        console.error('履歴・弱点データ取得失敗', err);
+        document.getElementById('weakness-text').textContent = '成績データの取得に失敗しました。ページを再読み込みしてもう一度お試しください。';
       }
     }
 
@@ -1309,5 +1432,6 @@
       showStartScreen();
     }
   </script>
+
 </body>
 </html>
