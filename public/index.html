@@ -562,6 +562,8 @@
     let catHistory = [];
     let catCurrentQuestion = null;
     let catSelectedAnswer = null;
+    let catQuestionHistory = [];
+    let isCatSubmitting = false;
     let catSessionId = '';
 
     // 中断データの保存間隔と有効期限
@@ -944,6 +946,7 @@
           throw new Error('CATセッションIDが取得できませんでした。');
         }
         catHistory = [];
+        catQuestionHistory = [];
         catCurrentQuestion = data.question;
         catSelectedAnswer = null;
 
@@ -1012,10 +1015,21 @@
     }
 
     async function submitCatAnswer() {
+      if (isCatSubmitting) return;
+
       if (!catSelectedAnswer) {
         alert('解答の選択肢を選んでください。');
         return;
       }
+
+      isCatSubmitting = true;
+      const submitButton = document.getElementById('cat-submit-btn');
+      if (submitButton) {
+        submitButton.disabled = true;
+        submitButton.textContent = '送信中…';
+      }
+
+      const answeredQuestion = catCurrentQuestion ? { ...catCurrentQuestion } : null;
 
       try {
         const res = await fetchWithAuth('/api/cat/answer', {
@@ -1034,9 +1048,11 @@
         }
 
         if (data.isFinished) {
+          if (answeredQuestion) catQuestionHistory.push(answeredQuestion);
           catSessionId = '';
           renderResultScreenFromCat(data);
         } else {
+          if (answeredQuestion) catQuestionHistory.push(answeredQuestion);
           catStep = Number(data.step) || (catStep + 1);
           catHistory = Array.isArray(data.history) ? data.history : catHistory;
           catCurrentQuestion = data.question;
@@ -1045,6 +1061,12 @@
       } catch (err) {
         console.error('CAT解答送信失敗', err);
         alert('送信中にエラーが発生しました。');
+      } finally {
+        isCatSubmitting = false;
+        if (submitButton) {
+          submitButton.disabled = false;
+          submitButton.textContent = '回答して次へ進む ➔';
+        }
       }
     }
 
@@ -1066,6 +1088,13 @@
           const difficulty = Number(item.difficulty);
           const difficultyText = Number.isFinite(difficulty) ? difficulty.toFixed(2) : '-';
           const explanation = item.explanation || '';
+          const question = catQuestionHistory[index] || {};
+          const questionText = question.question_text || '';
+          const options = [question.option1, question.option2, question.option3, question.option4];
+          const userAnswer = Number(item.userAnswer) || 0;
+          const correctOption = Number(item.correctOption) || 0;
+          const userOptionText = userAnswer && options[userAnswer - 1] ? options[userAnswer - 1] : '未回答';
+          const correctOptionText = correctOption && options[correctOption - 1] ? options[correctOption - 1] : '';
 
           const card = document.createElement('div');
           card.className = `review-card ${isCorrect ? 'correct-card' : 'incorrect-card'}`;
@@ -1076,9 +1105,19 @@
                 ${isCorrect ? '⭕️ 正解' : '❌ 不正解'}
               </span>
             </div>
+            ${questionText ? `
+              <div style="font-weight: bold; margin-bottom: 12px; font-size: 1.05rem;">
+                ${sanitizeHtml(questionText)}
+              </div>
+            ` : ''}
             <div style="font-size: 0.95rem; margin-bottom: 6px;">
-              あなたの選択: 選択肢 <strong>${Number(item.userAnswer) || '-'}</strong> / 正解: <strong>${Number(item.correctOption) || '-'}</strong>
+              あなたの回答: <span style="color: ${isCorrect ? 'var(--success-color)' : 'var(--danger-color)'}; font-weight: bold;">${sanitizeHtml(userOptionText)}</span>
             </div>
+            ${!isCorrect ? `
+              <div style="font-size: 0.95rem; margin-bottom: 6px;">
+                正解: <span style="color: var(--success-color); font-weight: bold;">${sanitizeHtml(correctOptionText)}</span>
+              </div>
+            ` : ''}
             ${explanation ? `
               <div class="explanation-box">
                 <strong>💡 解説:</strong><br>
@@ -1466,6 +1505,7 @@
     function backToStart() {
       catSessionId = '';
       catHistory = [];
+      catQuestionHistory = [];
       catCurrentQuestion = null;
       catSelectedAnswer = null;
       showStartScreen();
