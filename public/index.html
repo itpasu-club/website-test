@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>IT模擬試験</title>
   <meta name="description" content="ITパスポート学習向けのオンライン模擬試験・成績分析アプリ">
-  <meta name="referrer" content="strict-origin-when-cross-origin">
+  <!-- DOMPurify CDN & Chart.js -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.6/purify.min.js" defer></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.0/dist/chart.umd.min.js" defer></script>
   <style>
@@ -320,6 +320,13 @@
       outline: 3px solid rgba(0, 102, 204, 0.35);
       outline-offset: 2px;
     }
+
+    .loading-message {
+      text-align: center;
+      padding: 20px;
+      color: #666;
+    }
+
     .explanation-box {
       background: #eef7ff;
       border-left: 4px solid var(--primary-color);
@@ -439,7 +446,7 @@
             <div class="question-header">
               <div>
                 <span class="category-badge" id="q-category">分野</span>
-                <span class="cat-badge" id="cat-mode-indicator" style="display:none;">🤖 CAT適応調整中</span>
+                <span class="cat-badge" id="cat-mode-indicator" style="display:none;">🎯 CAT適応調整中</span>
               </div>
               <label class="review-checkbox-label" id="review-checkbox-container">
                 <input type="checkbox" id="review-checkbox" onchange="toggleReviewFlag()"> 🔖 あとで見直す
@@ -528,7 +535,10 @@
 
   </div>
 
-  <script>
+    <script>
+    // -----------------------------
+    // アプリ状態
+    // -----------------------------
     let authToken = localStorage.getItem('auth_token') || '';
     let currentUsername = '';
     let isAuthRegisterMode = false;
@@ -545,24 +555,24 @@
     let lastExamStateSaveAt = 0;
     let isSubmitting = false;
 
-    const EXAM_STATE_SAVE_INTERVAL_MS = 5000;
-    const EXAM_STATE_MAX_AGE_MS = 48 * 60 * 60 * 1000;
-
-    // ★ CAT（適応型テスト）専用状態変数
+    // CAT（適応型テスト）専用状態
     let isCatMode = false;
     let catStep = 1;
     let catTotalSteps = 20;
     let catHistory = [];
     let catCurrentQuestion = null;
     let catSelectedAnswer = null;
+    let catSessionId = '';
+
+    // 中断データの保存間隔と有効期限
+    const EXAM_STATE_SAVE_INTERVAL_MS = 5000;
+    const EXAM_STATE_MAX_AGE_MS = 48 * 60 * 60 * 1000;
 
     function switchScreen(activeScreenId) {
       const screens = ['auth-screen', 'start-screen', 'quiz-screen', 'result-screen', 'history-screen'];
       screens.forEach(id => {
         const el = document.getElementById(id);
-        if (el) {
-          el.style.display = (id === activeScreenId) ? 'block' : 'none';
-        }
+        if (el) el.style.display = (id === activeScreenId) ? 'block' : 'none';
       });
     }
 
@@ -592,15 +602,16 @@
     async function fetchWithAuth(url, options = {}) {
       const headers = new Headers(options.headers || {});
       if (authToken) headers.set('Authorization', `Bearer ${authToken}`);
+
       const res = await fetch(url, { ...options, headers });
       if (res.status === 401 || res.status === 403) {
         logout();
-        throw new Error("認証エラーが発生しました。再ログインしてください。");
+        throw new Error('認証エラーが発生しました。再ログインしてください。');
       }
       return res;
     }
 
-    window.onload = async () => {
+    window.addEventListener('load', async () => {
       if (authToken) {
         try {
           const res = await fetchWithAuth('/api/me');
@@ -610,11 +621,14 @@
             await showStartScreen();
             return;
           }
-        } catch (e) { console.warn("認証チェック失敗"); }
+        } catch (e) {
+          console.warn('認証チェック失敗');
+        }
       }
       showAuthScreen();
-    };
+    });
 
+    // ブラウザ終了・リロード時にも最新状態を保存
     window.addEventListener('pagehide', () => saveExamState(true));
 
     function onModeChange() {
@@ -622,20 +636,17 @@
       const countGroup = document.getElementById('count-group');
       const timerGroup = document.getElementById('timer-group');
 
-      if (mode === 'cat') {
-        countGroup.style.display = 'none';
-        timerGroup.style.display = 'none';
-      } else {
-        countGroup.style.display = 'block';
-        timerGroup.style.display = 'block';
-      }
+      const isCat = mode === 'cat';
+      countGroup.style.display = isCat ? 'none' : 'block';
+      timerGroup.style.display = isCat ? 'none' : 'block';
     }
 
     function toggleAuthMode() {
       isAuthRegisterMode = !isAuthRegisterMode;
-      document.getElementById('auth-title').textContent = isAuthRegisterMode ? "新規会員登録" : "ログイン";
-      document.getElementById('auth-submit-btn').textContent = isAuthRegisterMode ? "登録して開始" : "ログイン";
-      document.getElementById('auth-toggle-btn').textContent = isAuthRegisterMode ? "ログイン画面へ戻る" : "新規会員登録はこちら";
+      document.getElementById('auth-title').textContent = isAuthRegisterMode ? '新規会員登録' : 'ログイン';
+      document.getElementById('auth-submit-btn').textContent = isAuthRegisterMode ? '登録して開始' : 'ログイン';
+      document.getElementById('auth-toggle-btn').textContent = isAuthRegisterMode ? 'ログイン画面へ戻る' : '新規会員登録はこちら';
+      document.getElementById('auth-password').setAttribute('autocomplete', isAuthRegisterMode ? 'new-password' : 'current-password');
     }
 
     async function handleAuth() {
@@ -643,7 +654,7 @@
       const password = document.getElementById('auth-password').value;
 
       if (!username || !password) {
-        alert("ユーザー名とパスワードを入力してください。");
+        alert('ユーザー名とパスワードを入力してください。');
         return;
       }
 
@@ -658,7 +669,7 @@
 
         const data = await res.json();
         if (!res.ok) {
-          alert(data.error || "認証に失敗しました。");
+          alert(data.error || '認証に失敗しました。');
           return;
         }
 
@@ -666,13 +677,14 @@
         localStorage.setItem('auth_token', authToken);
         currentUsername = data.username;
 
-        showStartScreen();
+        await showStartScreen();
       } catch (err) {
-        alert("通信エラーが発生しました。");
+        alert('通信エラーが発生しました。');
       }
     }
 
     function logout() {
+      stopTimer();
       authToken = '';
       currentUsername = '';
       localStorage.removeItem('auth_token');
@@ -684,6 +696,7 @@
     }
 
     async function showStartScreen() {
+      stopTimer();
       switchScreen('start-screen');
       document.getElementById('current-user-display').textContent = currentUsername;
 
@@ -692,21 +705,28 @@
 
       try {
         const res = await fetch('/api/categories');
-        const categories = await res.json();
+        if (!res.ok) throw new Error(`categories request failed: ${res.status}`);
 
+        const categories = await res.json();
         const select = document.getElementById('category-select');
         select.innerHTML = '<option value="all">全分野（ランダム出題）</option>';
-        categories.forEach(cat => {
-          const opt = document.createElement('option');
-          opt.value = cat;
-          opt.textContent = cat;
-          select.appendChild(opt);
-        });
-      } catch (err) {}
+
+        if (Array.isArray(categories)) {
+          categories.forEach(cat => {
+            const opt = document.createElement('option');
+            opt.value = cat;
+            opt.textContent = cat;
+            select.appendChild(opt);
+          });
+        }
+      } catch (err) {
+        console.warn('カテゴリ取得失敗', err);
+      }
     }
 
     function getSavedExamState() {
       if (!currentUsername) return null;
+
       const key = `exam_state_${currentUsername}`;
       const saved = localStorage.getItem(key);
       if (!saved) return null;
@@ -714,12 +734,15 @@
       try {
         const state = JSON.parse(saved);
         const savedAt = Number(state?.timestamp || 0);
+
         if (!state || state.username !== currentUsername || !Array.isArray(state.questions) || state.questions.length === 0) {
           throw new Error('保存データの形式が不正です。');
         }
+
         if (savedAt > 0 && Date.now() - savedAt > EXAM_STATE_MAX_AGE_MS) {
           throw new Error('保存データの有効期限が切れています。');
         }
+
         return state;
       } catch (err) {
         console.warn('保存された試験データを削除します:', err.message);
@@ -730,6 +753,7 @@
 
     function saveExamState(force = false) {
       if (isCatMode || questions.length === 0 || !currentUsername) return;
+
       const now = Date.now();
       if (!force && now - lastExamStateSaveAt < EXAM_STATE_SAVE_INTERVAL_MS) return;
 
@@ -773,6 +797,7 @@
       remainingSeconds = Math.max(Number(state.remainingSeconds) || 0, 0);
       selectedCategory = state.selectedCategory || 'all';
 
+      // 保存時刻から経過した時間を差し引き、リロード直後にタイマーが巻き戻らないようにする。
       if (state.timerEnabled && state.timestamp) {
         const elapsedSeconds = Math.floor((Date.now() - Number(state.timestamp)) / 1000);
         remainingSeconds = Math.max(0, remainingSeconds - Math.max(0, elapsedSeconds));
@@ -781,6 +806,7 @@
       lastExamStateSaveAt = 0;
       setupUIForMode(false);
       switchScreen('quiz-screen');
+
       document.getElementById('display-user-id').textContent = currentUsername;
       document.getElementById('total-count').textContent = questions.length;
 
@@ -841,15 +867,15 @@
       const mode = document.getElementById('mode-select').value;
 
       if (mode === 'cat') {
-        startCatQuiz();
+        await startCatQuiz();
         return;
       }
 
-      // 従来モード (standard / weakness)
       userAnswers = {};
       reviewFlags = {};
       currentIndex = 0;
-      if (timerInterval) clearInterval(timerInterval);
+      remainingSeconds = 0;
+      stopTimer();
 
       const questionCount = document.getElementById('count-select').value;
       const timeLimitSec = parseInt(document.getElementById('timer-select').value, 10);
@@ -857,11 +883,12 @@
       try {
         const res = await fetchWithAuth(`/api/questions?category=${encodeURIComponent(selectedCategory)}&limit=${questionCount}&mode=${mode}`);
         if (!res.ok) throw new Error(`questions request failed: ${res.status}`);
+
         const data = await res.json();
         questions = Array.isArray(data) ? data : [];
 
         if (questions.length === 0) {
-          alert("該当する問題が存在しません。");
+          alert('該当する問題が存在しません。');
           return;
         }
 
@@ -874,27 +901,30 @@
         renderNavGrid();
         showQuestion(0);
 
+        const timerDisplay = document.getElementById('timer-display');
         if (timeLimitSec > 0) {
           remainingSeconds = timeLimitSec;
           startTimer();
         } else {
-          document.getElementById('timer-display').textContent = '制限時間: なし';
+          timerDisplay.textContent = '制限時間: なし';
+          timerDisplay.classList.remove('warning');
         }
 
         saveExamState(true);
-
       } catch (err) {
         console.error('問題データ取得失敗', err);
-        alert("問題データの取得に失敗しました。");
+        alert('問題データの取得に失敗しました。');
       }
     }
 
-    // ★ CATモード開始処理
+    // CATモード開始
     async function startCatQuiz() {
-      try {
-        if (timerInterval) clearInterval(timerInterval);
-        document.getElementById('timer-display').textContent = 'CAT適応テスト実行中';
+      stopTimer();
+      remainingSeconds = 0;
+      document.getElementById('timer-display').textContent = 'CAT適応テスト実行中';
+      document.getElementById('timer-display').classList.remove('warning');
 
+      try {
         const res = await fetchWithAuth('/api/cat/start', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -903,12 +933,16 @@
 
         const data = await res.json();
         if (!res.ok) {
-          alert(data.error || "CATテストの開始に失敗しました。");
+          alert(data.error || 'CATテストの開始に失敗しました。');
           return;
         }
 
         catStep = Number(data.step) || 1;
         catTotalSteps = Number(data.totalSteps) || 20;
+        catSessionId = String(data.sessionId || '');
+        if (!catSessionId) {
+          throw new Error('CATセッションIDが取得できませんでした。');
+        }
         catHistory = [];
         catCurrentQuestion = data.question;
         catSelectedAnswer = null;
@@ -918,13 +952,12 @@
 
         document.getElementById('display-user-id').textContent = currentUsername;
         renderCatQuestion();
-
       } catch (err) {
-        alert("適応テストの開始に失敗しました。");
+        console.error('CAT開始失敗', err);
+        alert('適応テストの開始に失敗しました。');
       }
     }
 
-    // ★ CAT1問表示描画
     function renderCatQuestion() {
       catSelectedAnswer = null;
       const q = catCurrentQuestion;
@@ -952,18 +985,21 @@
     function renderOptions(options, inputName, onSelect) {
       const container = document.getElementById('q-options');
       container.innerHTML = '';
-      const fragment = document.createDocumentFragment();
 
+      const fragment = document.createDocumentFragment();
       options.forEach(opt => {
         const label = document.createElement('label');
         label.className = 'option-item';
+
         const input = document.createElement('input');
         input.type = 'radio';
         input.name = inputName;
         input.value = String(opt.num);
         input.addEventListener('change', () => onSelect(opt.num));
+
         const span = document.createElement('span');
         span.innerHTML = sanitizeHtml(opt.text);
+
         label.append(input, span);
         fragment.appendChild(label);
       });
@@ -975,10 +1011,9 @@
       catSelectedAnswer = optionNum;
     }
 
-    // ★ CAT 1問解答送信
     async function submitCatAnswer() {
       if (!catSelectedAnswer) {
-        alert("解答の選択肢を選んでください。");
+        alert('解答の選択肢を選んでください。');
         return;
       }
 
@@ -987,37 +1022,34 @@
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            questionId: catCurrentQuestion.id,
-            userAnswer: catSelectedAnswer,
-            history: catHistory,
-            category: selectedCategory
+            sessionId: catSessionId,
+            userAnswer: catSelectedAnswer
           })
         });
 
         const data = await res.json();
         if (!res.ok) {
-          alert(data.error || "解答の処理に失敗しました。");
+          alert(data.error || '解答の処理に失敗しました。');
           return;
         }
 
         if (data.isFinished) {
-          // CAT テスト終了時
+          catSessionId = '';
           renderResultScreenFromCat(data);
         } else {
-          // 次の問へ進行
           catStep = Number(data.step) || (catStep + 1);
           catHistory = Array.isArray(data.history) ? data.history : catHistory;
           catCurrentQuestion = data.question;
           renderCatQuestion();
         }
-
       } catch (err) {
-        alert("送信中にエラーが発生しました。");
+        console.error('CAT解答送信失敗', err);
+        alert('送信中にエラーが発生しました。');
       }
     }
 
-    // ★ CAT結果画面表示
     function renderResultScreenFromCat(data) {
+      stopTimer();
       switchScreen('result-screen');
       document.getElementById('result-user-id').textContent = currentUsername;
       document.getElementById('score-val').textContent = data.score;
@@ -1028,23 +1060,24 @@
       const reviewList = document.getElementById('review-list');
       reviewList.innerHTML = '';
 
-      if (data.history && Array.isArray(data.history)) {
+      if (Array.isArray(data.history)) {
         data.history.forEach((item, index) => {
-          const isCorrect = item.isCorrect === 1;
+          const isCorrect = item.isCorrect === 1 || item.isCorrect === true;
+          const difficulty = Number(item.difficulty);
+          const difficultyText = Number.isFinite(difficulty) ? difficulty.toFixed(2) : '-';
           const explanation = item.explanation || '';
 
           const card = document.createElement('div');
           card.className = `review-card ${isCorrect ? 'correct-card' : 'incorrect-card'}`;
-
           card.innerHTML = `
             <div class="review-card-header">
-              <span>問 ${index + 1} (推定難易度 $b$: ${item.difficulty.toFixed(2)})</span>
+              <span>問 ${index + 1} (推定難易度 $b$: ${difficultyText})</span>
               <span class="status-badge ${isCorrect ? 'correct' : 'incorrect'}">
                 ${isCorrect ? '⭕️ 正解' : '❌ 不正解'}
               </span>
             </div>
             <div style="font-size: 0.95rem; margin-bottom: 6px;">
-              あなたの選択: 選択肢 <strong>${item.userAnswer}</strong> / 正解: <strong>${item.correctOption}</strong>
+              あなたの選択: 選択肢 <strong>${Number(item.userAnswer) || '-'}</strong> / 正解: <strong>${Number(item.correctOption) || '-'}</strong>
             </div>
             ${explanation ? `
               <div class="explanation-box">
@@ -1053,22 +1086,32 @@
               </div>
             ` : ''}
           `;
-
           reviewList.appendChild(card);
         });
       }
     }
 
+    function stopTimer() {
+      if (timerInterval !== null) {
+        clearInterval(timerInterval);
+        timerInterval = null;
+      }
+    }
+
     function startTimer() {
+      stopTimer();
       updateTimerDisplay();
+
       timerInterval = setInterval(() => {
+        if (remainingSeconds <= 0) return;
+
         remainingSeconds--;
         updateTimerDisplay();
         saveExamState();
 
         if (remainingSeconds <= 0) {
-          clearInterval(timerInterval);
-          alert("⏰ 制限時間になりました！解答を自動提出します。");
+          stopTimer();
+          alert('⏰ 制限時間になりました！解答を自動提出します。');
           submitAnswers();
         }
       }, 1000);
@@ -1076,16 +1119,20 @@
 
     function updateTimerDisplay() {
       const display = document.getElementById('timer-display');
+      if (!display) return;
+
       const m = Math.floor(remainingSeconds / 60).toString().padStart(2, '0');
       const s = (remainingSeconds % 60).toString().padStart(2, '0');
       display.textContent = `残り時間: ${m}:${s}`;
-      if (remainingSeconds <= 60) display.classList.add('warning');
+
+      if (remainingSeconds > 0 && remainingSeconds <= 60) display.classList.add('warning');
       else display.classList.remove('warning');
     }
 
     function abortQuiz() {
-      if (confirm("試験を中断しますか？")) {
-        if (timerInterval) clearInterval(timerInterval);
+      if (confirm('試験を中断しますか？')) {
+        stopTimer();
+        saveExamState(true);
         showStartScreen();
       }
     }
@@ -1124,28 +1171,11 @@
       document.getElementById('review-checkbox').checked = !!reviewFlags[q.id];
 
       const options = getShuffledOptions(q);
-      const container = document.getElementById('q-options');
-      container.innerHTML = '';
-      const fragment = document.createDocumentFragment();
-
-      options.forEach(opt => {
-        const label = document.createElement('label');
-        label.className = 'option-item';
-        const input = document.createElement('input');
-        input.type = 'radio';
-        input.name = 'option';
-        input.value = String(opt.num);
-        input.checked = userAnswers[q.id] === opt.num;
-        input.addEventListener('change', () => selectOption(q.id, opt.num));
-        const span = document.createElement('span');
-        span.innerHTML = sanitizeHtml(opt.text);
-        label.append(input, span);
-        fragment.appendChild(label);
-      });
-      container.appendChild(fragment);
+      renderOptions(options, 'option', optNum => selectOption(q.id, optNum));
 
       document.getElementById('prev-btn').style.visibility = (currentIndex === 0) ? 'hidden' : 'visible';
       document.getElementById('next-btn').style.display = (currentIndex === questions.length - 1) ? 'none' : 'inline-block';
+
       updateUI();
     }
 
@@ -1175,7 +1205,7 @@
       if (isCatMode) return;
       const answeredCount = Object.keys(userAnswers).length;
       document.getElementById('answered-count').textContent = answeredCount;
-      document.getElementById('progress-bar').style.width = `${(answeredCount / questions.length) * 100}%`;
+      document.getElementById('progress-bar').style.width = `${questions.length ? (answeredCount / questions.length) * 100 : 0}%`;
 
       questions.forEach((q, idx) => {
         const btn = document.getElementById(`grid-btn-${idx}`);
@@ -1191,8 +1221,8 @@
     function renderNavGrid() {
       const grid = document.getElementById('grid-container');
       grid.innerHTML = '';
-      const fragment = document.createDocumentFragment();
 
+      const fragment = document.createDocumentFragment();
       questions.forEach((q, idx) => {
         const btn = document.createElement('button');
         btn.id = `grid-btn-${idx}`;
@@ -1206,21 +1236,21 @@
         });
         fragment.appendChild(btn);
       });
-
       grid.appendChild(fragment);
       updateUI();
     }
 
     function confirmSubmit() {
       if (isSubmitting) return;
+
       const answeredCount = Object.keys(userAnswers).length;
       const unAnsweredCount = questions.length - answeredCount;
 
-      let msg = "解答を送信して採点を行いますか？";
+      let msg = '解答を送信して採点を行いますか？';
       if (unAnsweredCount > 0) msg = `未回答の問題が ${unAnsweredCount} 問あります。\n提出しますか？`;
 
       if (confirm(msg)) {
-        if (timerInterval) clearInterval(timerInterval);
+        stopTimer();
         submitAnswers();
       }
     }
@@ -1228,6 +1258,7 @@
     async function submitAnswers() {
       if (isSubmitting) return;
       isSubmitting = true;
+
       try {
         const questionIds = questions.map(q => q.id);
 
@@ -1235,80 +1266,82 @@
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            questionIds, answers: userAnswers, category: selectedCategory
+            questionIds,
+            answers: userAnswers,
+            category: selectedCategory
           })
         });
 
         const data = await res.json();
         if (!res.ok) {
-          alert(data.error || "採点処理エラー");
+          alert(data.error || '採点処理エラー');
           return;
         }
 
         clearExamState();
-
-        switchScreen('result-screen');
-        document.getElementById('result-user-id').textContent = currentUsername;
-        document.getElementById('score-val').textContent = data.score;
-        document.getElementById('max-score-val').textContent = data.maxScore;
-        document.getElementById('correct-val').textContent = data.correctCount;
-        document.getElementById('total-val').textContent = data.totalCount;
-
-        const reviewList = document.getElementById('review-list');
-        reviewList.innerHTML = '';
-
-        if (data.details && Array.isArray(data.details)) {
-          data.details.forEach((item, index) => {
-            const isCorrect = item.isCorrect ?? item.is_correct;
-            const userAnswer = item.userAnswer ?? item.user_answer;
-            const correctOption = item.correctOption ?? item.correct_option;
-            const explanation = item.explanation || '';
-            const questionText = item.questionText || item.question_text || '';
-
-            const options = [item.option1, item.option2, item.option3, item.option4];
-
-            const userOptionText = (userAnswer && options[userAnswer - 1]) ? options[userAnswer - 1] : '未回答';
-            const correctOptionText = (correctOption && options[correctOption - 1]) ? options[correctOption - 1] : '';
-
-            const card = document.createElement('div');
-            card.className = `review-card ${isCorrect ? 'correct-card' : 'incorrect-card'}`;
-
-            card.innerHTML = `
-              <div class="review-card-header">
-                <span>問 ${index + 1}</span>
-                <span class="status-badge ${isCorrect ? 'correct' : 'incorrect'}">
-                  ${isCorrect ? '⭕️ 正解' : '❌ 不正解'}
-                </span>
-              </div>
-              <div style="font-weight: bold; margin-bottom: 12px; font-size: 1.05rem;">
-                ${sanitizeHtml(questionText)}
-              </div>
-              <div style="font-size: 0.95rem; margin-bottom: 6px;">
-                あなたの回答: <span style="color: ${isCorrect ? 'var(--success-color)' : 'var(--danger-color)'}; font-weight: bold;">${sanitizeHtml(userOptionText)}</span>
-              </div>
-              ${!isCorrect ? `
-                <div style="font-size: 0.95rem; margin-bottom: 6px;">
-                  正解: <span style="color: var(--success-color); font-weight: bold;">${sanitizeHtml(correctOptionText)}</span>
-                </div>
-              ` : ''}
-              ${explanation ? `
-                <div class="explanation-box">
-                  <strong>💡 解説:</strong><br>
-                  ${sanitizeHtml(explanation)}
-                </div>
-              ` : ''}
-            `;
-
-            reviewList.appendChild(card);
-          });
-        }
-
+        renderStandardResult(data);
       } catch (err) {
         console.error('採点失敗', err);
-        alert("通信エラーまたは採点に失敗しました。");
+        alert('通信エラーまたは採点に失敗しました。');
       } finally {
         isSubmitting = false;
       }
+    }
+
+    function renderStandardResult(data) {
+      switchScreen('result-screen');
+      document.getElementById('result-user-id').textContent = currentUsername;
+      document.getElementById('score-val').textContent = data.score;
+      document.getElementById('max-score-val').textContent = data.maxScore;
+      document.getElementById('correct-val').textContent = data.correctCount;
+      document.getElementById('total-val').textContent = data.totalCount;
+
+      const reviewList = document.getElementById('review-list');
+      reviewList.innerHTML = '';
+
+      if (!Array.isArray(data.details)) return;
+
+      data.details.forEach((item, index) => {
+        const isCorrect = item.isCorrect ?? item.is_correct;
+        const userAnswer = Number(item.userAnswer ?? item.user_answer) || 0;
+        const correctOption = Number(item.correctOption ?? item.correct_option) || 0;
+        const explanation = item.explanation || '';
+        const questionText = item.questionText || item.question_text || '';
+
+        const options = [item.option1, item.option2, item.option3, item.option4];
+        const userOptionText = (userAnswer && options[userAnswer - 1]) ? options[userAnswer - 1] : '未回答';
+        const correctOptionText = (correctOption && options[correctOption - 1]) ? options[correctOption - 1] : '';
+
+        const card = document.createElement('div');
+        card.className = `review-card ${isCorrect ? 'correct-card' : 'incorrect-card'}`;
+        card.innerHTML = `
+          <div class="review-card-header">
+            <span>問 ${index + 1}</span>
+            <span class="status-badge ${isCorrect ? 'correct' : 'incorrect'}">
+              ${isCorrect ? '⭕️ 正解' : '❌ 不正解'}
+            </span>
+          </div>
+          <div style="font-weight: bold; margin-bottom: 12px; font-size: 1.05rem;">
+            ${sanitizeHtml(questionText)}
+          </div>
+          <div style="font-size: 0.95rem; margin-bottom: 6px;">
+            あなたの回答: <span style="color: ${isCorrect ? 'var(--success-color)' : 'var(--danger-color)'}; font-weight: bold;">${sanitizeHtml(userOptionText)}</span>
+          </div>
+          ${!isCorrect ? `
+            <div style="font-size: 0.95rem; margin-bottom: 6px;">
+              正解: <span style="color: var(--success-color); font-weight: bold;">${sanitizeHtml(correctOptionText)}</span>
+            </div>
+          ` : ''}
+          ${explanation ? `
+            <div class="explanation-box">
+              <strong>💡 解説:</strong><br>
+              ${sanitizeHtml(explanation)}
+            </div>
+          ` : ''}
+        `;
+
+        reviewList.appendChild(card);
+      });
     }
 
     async function showHistory() {
@@ -1317,6 +1350,7 @@
       document.getElementById('weakness-text').textContent = '分析データを取得しています...';
 
       try {
+        // 独立したAPIを並列取得して、待ち時間を短縮する。
         const [analyticsRes, historyRes] = await Promise.all([
           fetchWithAuth('/api/analytics'),
           fetchWithAuth('/api/history')
@@ -1344,6 +1378,7 @@
         if (analytics.categories && analytics.categories.length > 0 && typeof Chart !== 'undefined') {
           const catLabels = analytics.categories.map(c => c.category);
           const catAccuracies = analytics.categories.map(c => c.accuracy);
+
           const radarCtx = document.getElementById('radarChart').getContext('2d');
           if (radarChartInstance) radarChartInstance.destroy();
 
@@ -1429,9 +1464,12 @@
     }
 
     function backToStart() {
+      catSessionId = '';
+      catHistory = [];
+      catCurrentQuestion = null;
+      catSelectedAnswer = null;
       showStartScreen();
     }
   </script>
 
-</body>
-</html>
+</body></html>
