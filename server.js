@@ -8,6 +8,7 @@ const rateLimit = require('express-rate-limit');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const cors = require('cors');
+const crypto = require('crypto');
 
 const app = express();
 app.set('trust proxy', 1);
@@ -157,6 +158,23 @@ async function initDb() {
     '  answered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,',
     '  PRIMARY KEY (user_id, question_id)',
     ');',
+
+    'CREATE TABLE IF NOT EXISTS cat_sessions (',
+    '  session_id UUID PRIMARY KEY,',
+    '  user_id VARCHAR(50) NOT NULL,',
+    '  category VARCHAR(50) NOT NULL,',
+    '  step INT NOT NULL DEFAULT 1,',
+    '  current_question_id INT NOT NULL,',
+    "  history JSONB NOT NULL DEFAULT '[]'::jsonb,",
+    '  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,',
+    '  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP',
+    ');',
+
+    'CREATE INDEX IF NOT EXISTS idx_cat_sessions_user_id',
+    'ON cat_sessions (user_id);',
+
+    'CREATE INDEX IF NOT EXISTS idx_cat_sessions_updated_at',
+    'ON cat_sessions (updated_at);',
 
     'CREATE TABLE IF NOT EXISTS results (',
     '  id SERIAL PRIMARY KEY,',
@@ -1973,18 +1991,18 @@ app.post(
 // ============================================================
 // CAT開始
 //
-// DBアクセスなし。
-// 問題キャッシュから初期theta=0付近を選択。
+// CATの進行状態・回答履歴はサーバー側cat_sessionsで管理する。
+// クライアントからhistory/questionId/categoryを信用しない。
 // ============================================================
 
 app.post(
   '/api/cat/start',
   strictLimiter,
+  authenticateToken,
   async (req, res) => {
     try {
-      const {
-        category
-      } = req.body;
+      const { category } = req.body;
+      const authUserId = req.user.username;
 
       let candidates;
 
@@ -1992,96 +2010,89 @@ app.post(
         category &&
         category !== 'all'
       ) {
-        candidates =
-          questionCache.filter(
-            q =>
-              q.category.includes(
-                String(category)
-              )
-          );
+        candidates = questionCache.filter(
+          q => q.category.includes(String(category))
+        );
       } else {
-        candidates =
-          questionCache.filter(
-            q =>
-              getMajorCategory(
-                q.category
-              ) ===
-              'ストラテジ'
-          );
+        candidates = questionCache.filter(
+          q => getMajorCategory(q.category) === 'ストラテジ'
+        );
       }
 
-      if (
-        candidates.length === 0
-      ) {
+      if (candidates.length === 0) {
         return res.status(404).json({
-          error:
-            "出題可能な問題が見つかりませんでした。"
+          error: '出題可能な問題が見つかりませんでした。'
         });
       }
 
-      const question =
-        selectAdaptiveQuestion(
-          candidates,
-          new Set(),
-          0.0
-        );
+      const question = selectAdaptiveQuestion(
+        candidates,
+        new Set(),
+        0.0
+      );
 
       if (!question) {
         return res.status(404).json({
-          error:
-            "出題可能な問題が見つかりませんでした。"
+          error: '出題可能な問題が見つかりませんでした。'
         });
       }
 
+      // 同一ユーザーの古いCATセッションを削除
+      await timedQuery(
+        pool,
+        'DELETE FROM cat_sessions WHERE user_id = $1',
+        [authUserId],
+        'cat.deleteOldSession'
+      );
+
+      const sessionId = crypto.randomUUID();
+
+      await timedQuery(
+        pool,
+        `
+          INSERT INTO cat_sessions (
+            session_id,
+            user_id,
+            category,
+            step,
+            current_question_id,
+            history
+          )
+          VALUES ($1, $2, $3, 1, $4, '[]'::jsonb)
+        `,
+        [
+          sessionId,
+          authUserId,
+          category || 'all',
+          question.id
+        ],
+        'cat.createSession'
+      );
+
       res.json({
+        sessionId,
         step: 1,
         totalSteps: 20,
-
         question: {
-          id:
-            question.id,
-
-          category:
-            question.category,
-
-          question_text:
-            question.question_text,
-
-          option1:
-            question.option1,
-
-          option2:
-            question.option2,
-
-          option3:
-            question.option3,
-
-          option4:
-            question.option4,
-
-          image_url:
-            question.image_url,
-
-          difficulty:
-            question.difficulty
-        },
-
-        history: []
+          id: question.id,
+          category: question.category,
+          question_text: question.question_text,
+          option1: question.option1,
+          option2: question.option2,
+          option3: question.option3,
+          option4: question.option4,
+          image_url: question.image_url,
+          difficulty: question.difficulty
+        }
       });
 
     } catch (err) {
-
-      logger.error(
-        "CAT開始エラー",
-        {
-          error:
-            err.message
-        }
-      );
+      logger.error('CAT開始エラー', {
+        error: err.message
+      });
 
       res.status(500).json({
-        error:
-          "CATテストの開始に失敗しました。"
+        error: 'CATテストの開始に失敗しました。'
       });
     }
   }
@@ -2090,12 +2101,8 @@ app.post(
 // ============================================================
 // CAT回答
 //
-// 改善点:
-//   ・現在問題のSELECT → キャッシュ
-//   ・answeredCheck → ユーザー進捗キャッシュ
-//   ・次問題SELECT → キャッシュ
-//
-// DBへ行くのは主に書き込みだけ。
+// history / questionId / category はクライアントから受け取らない。
+// 現在問題と履歴はcat_sessionsからサーバー側で取得する。
 // ============================================================
 
 app.post(
@@ -2107,103 +2114,31 @@ app.post(
 
     try {
       const {
-        questionId,
-        userAnswer,
-        history,
-        category
+        sessionId,
+        userAnswer
       } = req.body;
 
-      const authUserId =
-        req.user.username;
+      const authUserId = req.user.username;
 
       if (
-        !questionId ||
-        userAnswer ===
-          undefined ||
-        !Array.isArray(history)
+        !sessionId ||
+        typeof sessionId !== 'string' ||
+        userAnswer === undefined
       ) {
         return res.status(400).json({
-          error:
-            "リクエストパラメータが不正です。"
+          error: 'リクエストパラメータが不正です。'
         });
       }
 
-      // historyが巨大になるのを防止
-      if (
-        history.length >=
-        20
-      ) {
+      const numericAnswer = Number(userAnswer);
+
+      if (![1, 2, 3, 4].includes(numericAnswer)) {
         return res.status(400).json({
-          error:
-            "CAT履歴が不正です。"
+          error: '解答番号が不正です。'
         });
       }
 
-      const currentQ =
-        getQuestionById(
-          Number(questionId)
-        );
-
-      if (!currentQ) {
-        return res.status(404).json({
-          error:
-            "問題が見つかりません。"
-        });
-      }
-
-      const isCorrect =
-        (
-          Number(userAnswer) ===
-          Number(
-            currentQ.correct_option
-          )
-        )
-          ? 1
-          : 0;
-
-      const progress =
-        await getUserProgress(
-          authUserId
-        );
-
-      const isFirstTime =
-        !progress.has(
-          currentQ.id
-        );
-
-      // この時点のdifficultyをIRT用に保持
-      const originalDifficulty =
-        Number(
-          currentQ.difficulty ?? 0
-        );
-
-      // DBに書き込む対象
-      const qIds = [
-        currentQ.id
-      ];
-
-      const qCorrects = [
-        isCorrect
-      ];
-
-      const qFirstTimes = [
-        isFirstTime ? 1 : 0
-      ];
-
-      const uUsers = [
-        authUserId
-      ];
-
-      const uQIds = [
-        currentQ.id
-      ];
-
-      const uCorrects = [
-        isCorrect
-      ];
-
-      client =
-        await pool.connect();
+      client = await pool.connect();
 
       await timedQuery(
         client,
@@ -2212,120 +2147,142 @@ app.post(
         'cat.BEGIN'
       );
 
-      const updatedQuestions =
-        await timedQuery(
-          client,
-          UPDATE_QUESTION_STATS_SQL,
-          [
-            qIds,
-            qCorrects,
-            qFirstTimes
-          ],
-          'cat.updateQuestion'
-        );
+      // セッションはユーザー本人のものだけ取得し、同時回答を防止する。
+      const sessionRes = await timedQuery(
+        client,
+        `
+          SELECT
+            session_id,
+            user_id,
+            category,
+            step,
+            current_question_id,
+            history
+          FROM cat_sessions
+          WHERE session_id = $1
+            AND user_id = $2
+          FOR UPDATE
+        `,
+        [sessionId, authUserId],
+        'cat.getSession'
+      );
+
+      if (sessionRes.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({
+          error: 'CATセッションが見つからないか、期限切れです。最初からやり直してください。'
+        });
+      }
+
+      const session = sessionRes.rows[0];
+      const history = Array.isArray(session.history)
+        ? session.history
+        : [];
+
+      if (
+        history.length !== Number(session.step) - 1 ||
+        history.length >= 20
+      ) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'CATセッションの状態が不正です。最初からやり直してください。'
+        });
+      }
+
+      const currentQ = getQuestionById(
+        Number(session.current_question_id)
+      );
+
+      if (!currentQ) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({
+          error: '現在の問題が見つかりません。'
+        });
+      }
+
+      const isCorrect = (
+        numericAnswer === Number(currentQ.correct_option)
+      ) ? 1 : 0;
+
+      const progress = await getUserProgress(authUserId);
+      const isFirstTime = !progress.has(currentQ.id);
+
+      const originalDifficulty = Number(
+        currentQ.difficulty ?? 0
+      );
+
+      const qIds = [currentQ.id];
+      const qCorrects = [isCorrect];
+      const qFirstTimes = [isFirstTime ? 1 : 0];
+      const uUsers = [authUserId];
+      const uQIds = [currentQ.id];
+      const uCorrects = [isCorrect];
+
+      const updatedQuestions = await timedQuery(
+        client,
+        UPDATE_QUESTION_STATS_SQL,
+        [qIds, qCorrects, qFirstTimes],
+        'cat.updateQuestion'
+      );
 
       await timedQuery(
         client,
         UPSERT_USER_ANSWERS_SQL,
-        [
-          uUsers,
-          uQIds,
-          uCorrects
-        ],
+        [uUsers, uQIds, uCorrects],
         'cat.upsertUserAnswer'
       );
 
-      // 現在の問題を履歴へ追加
       const updatedHistory = [
         ...history,
         {
-          questionId:
-            currentQ.id,
-
+          questionId: currentQ.id,
           isCorrect,
-
-          difficulty:
-            originalDifficulty,
-
-          discrimination:
-            1.0,
-
-          userAnswer:
-            Number(
-              userAnswer
-            ),
-
-          correctOption:
-            Number(
-              currentQ.correct_option
-            ),
-
-          explanation:
-            currentQ.explanation ||
-            ''
+          difficulty: originalDifficulty,
+          discrimination: 1.0,
+          userAnswer: numericAnswer,
+          correctOption: Number(currentQ.correct_option),
+          explanation: currentQ.explanation || ''
         }
       ];
 
-      const responses =
-        updatedHistory.map(
-          h => h.isCorrect
-        );
+      const responses = updatedHistory.map(
+        h => h.isCorrect
+      );
 
-      const questionParams =
-        updatedHistory.map(
-          h => ({
-            difficulty:
-              Number(
-                h.difficulty ?? 0
-              ),
+      const questionParams = updatedHistory.map(
+        h => ({
+          difficulty: Number(h.difficulty ?? 0),
+          discrimination: Number(h.discrimination || 1)
+        })
+      );
 
-            discrimination:
-              Number(
-                h.discrimination || 1
-              )
-          })
-        );
+      const irtResult = calculateIRTScore(
+        responses,
+        questionParams
+      );
 
-      const irtResult =
-        calculateIRTScore(
-          responses,
-          questionParams
-        );
-
-      const currentTheta =
-        irtResult.theta;
-
+      const currentTheta = irtResult.theta;
       const totalSteps = 20;
 
       // ======================================================
       // CAT終了
       // ======================================================
 
-      if (
-        updatedHistory.length >=
-        totalSteps
-      ) {
-        const correctCount =
-          updatedHistory.filter(
-            h =>
-              h.isCorrect === 1
-          ).length;
+      if (updatedHistory.length >= totalSteps) {
+        const correctCount = updatedHistory.filter(
+          h => h.isCorrect === 1
+        ).length;
 
-        const finalScore =
-          correctCount === 0
-            ? 0
-            : irtResult.score;
+        const finalScore = correctCount === 0
+          ? 0
+          : irtResult.score;
 
-        const categoryName =
-          (
-            !category ||
-            category === 'all'
-          )
-            ? 'CATスピードテスト'
-            : `CAT:${String(category).substring(
-                0,
-                45
-              )}`;
+        const categoryName = (
+          !session.category ||
+          session.category === 'all'
+        )
+          ? 'CATスピードテスト'
+          : `CAT:${String(session.category).substring(0, 45)}`;
 
         await timedQuery(
           client,
@@ -2338,15 +2295,7 @@ app.post(
               correct_count,
               total_count
             )
-
-            VALUES (
-              $1,
-              $2,
-              $3,
-              $4,
-              $5,
-              $6
-            )
+            VALUES ($1, $2, $3, $4, $5, $6)
           `,
           [
             authUserId,
@@ -2361,19 +2310,20 @@ app.post(
 
         await timedQuery(
           client,
+          'DELETE FROM cat_sessions WHERE session_id = $1',
+          [sessionId],
+          'cat.deleteSession'
+        );
+
+        await timedQuery(
+          client,
           'COMMIT',
           [],
           'cat.COMMIT'
         );
 
-        // キャッシュ更新
-        for (
-          const row of
-            updatedQuestions.rows
-        ) {
-          updateQuestionCache(
-            row
-          );
+        for (const row of updatedQuestions.rows) {
+          updateQuestionCache(row);
         }
 
         updateUserProgressCache(
@@ -2383,36 +2333,16 @@ app.post(
         );
 
         return res.json({
-          isFinished:
-            true,
-
-          score:
-            finalScore,
-
-          maxScore:
-            1000,
-
+          isFinished: true,
+          score: finalScore,
+          maxScore: 1000,
           correctCount,
-
-          totalCount:
-            totalSteps,
-
+          totalCount: totalSteps,
           currentTheta,
-
-          lastAnswerCorrect:
-            isCorrect === 1,
-
-          explanation:
-            currentQ.explanation ||
-            '',
-
-          correctOption:
-            Number(
-              currentQ.correct_option
-            ),
-
-          history:
-            updatedHistory
+          lastAnswerCorrect: isCorrect === 1,
+          explanation: currentQ.explanation || '',
+          correctOption: Number(currentQ.correct_option),
+          history: updatedHistory
         });
       }
 
@@ -2420,91 +2350,85 @@ app.post(
       // 次問題選択
       // ======================================================
 
-      let targetMajor =
-        null;
+      let targetMajor = null;
 
-      if (
-        category &&
-        category !== 'all'
-      ) {
-        targetMajor = null;
-      } else {
-        const nextStep =
-          updatedHistory.length;
+      if (!session.category || session.category === 'all') {
+        const nextStep = updatedHistory.length;
 
-        if (
-          nextStep < 6
-        ) {
-          targetMajor =
-            'ストラテジ';
-        } else if (
-          nextStep < 10
-        ) {
-          targetMajor =
-            'マネジメント';
+        if (nextStep < 6) {
+          targetMajor = 'ストラテジ';
+        } else if (nextStep < 10) {
+          targetMajor = 'マネジメント';
         } else {
-          targetMajor =
-            'テクノロジ';
+          targetMajor = 'テクノロジ';
         }
       }
 
       let candidates;
 
       if (
-        category &&
-        category !== 'all'
+        session.category &&
+        session.category !== 'all'
       ) {
-        candidates =
-          questionCache.filter(
-            q =>
-              q.category.includes(
-                String(category)
-              )
-          );
+        candidates = questionCache.filter(
+          q => q.category.includes(String(session.category))
+        );
       } else {
-        candidates =
-          questionCache.filter(
-            q =>
-              getMajorCategory(
-                q.category
-              ) ===
-              targetMajor
-          );
+        candidates = questionCache.filter(
+          q => getMajorCategory(q.category) === targetMajor
+        );
       }
 
-      const usedIds =
-        new Set(
-          updatedHistory.map(
-            h =>
-              Number(
-                h.questionId
-              )
-          )
-        );
+      const usedIds = new Set(
+        updatedHistory.map(
+          h => Number(h.questionId)
+        )
+      );
 
-      let nextQuestion =
-        selectAdaptiveQuestion(
-          candidates,
+      let nextQuestion = selectAdaptiveQuestion(
+        candidates,
+        usedIds,
+        currentTheta
+      );
+
+      if (!nextQuestion) {
+        nextQuestion = selectAdaptiveQuestion(
+          questionCache,
           usedIds,
           currentTheta
         );
-
-      // カテゴリ内に残りがない場合は全カテゴリから取得
-      if (!nextQuestion) {
-        nextQuestion =
-          selectAdaptiveQuestion(
-            questionCache,
-            usedIds,
-            currentTheta
-          );
       }
 
       if (!nextQuestion) {
+        await client.query('ROLLBACK');
         return res.status(500).json({
-          error:
-            "次の問題を取得できませんでした。"
+          error: '次の問題を取得できませんでした。'
         });
       }
+
+      const nextStep = updatedHistory.length + 1;
+
+      await timedQuery(
+        client,
+        `
+          UPDATE cat_sessions
+          SET
+            step = $1,
+            current_question_id = $2,
+            history = $3::jsonb,
+            updated_at = CURRENT_TIMESTAMP
+          WHERE session_id = $4
+            AND user_id = $5
+        `,
+        [
+          nextStep,
+          nextQuestion.id,
+          JSON.stringify(updatedHistory),
+          sessionId,
+          authUserId
+        ],
+        'cat.updateSession'
+      );
 
       await timedQuery(
         client,
@@ -2513,14 +2437,8 @@ app.post(
         'cat.COMMIT'
       );
 
-      // DB更新成功後にキャッシュ更新
-      for (
-        const row of
-          updatedQuestions.rows
-      ) {
-        updateQuestionCache(
-          row
-        );
+      for (const row of updatedQuestions.rows) {
+        updateQuestionCache(row);
       }
 
       updateUserProgressCache(
@@ -2530,97 +2448,46 @@ app.post(
       );
 
       res.json({
-        isFinished:
-          false,
-
-        step:
-          updatedHistory.length +
-          1,
-
+        isFinished: false,
+        step: nextStep,
         totalSteps,
-
         currentTheta,
-
-        lastAnswerCorrect:
-          isCorrect === 1,
-
-        explanation:
-          currentQ.explanation ||
-          '',
-
-        correctOption:
-          Number(
-            currentQ.correct_option
-          ),
-
+        lastAnswerCorrect: isCorrect === 1,
+        explanation: currentQ.explanation || '',
+        correctOption: Number(currentQ.correct_option),
         question: {
-          id:
-            nextQuestion.id,
-
-          category:
-            nextQuestion.category,
-
-          question_text:
-            nextQuestion.question_text,
-
-          option1:
-            nextQuestion.option1,
-
-          option2:
-            nextQuestion.option2,
-
-          option3:
-            nextQuestion.option3,
-
-          option4:
-            nextQuestion.option4,
-
-          image_url:
-            nextQuestion.image_url,
-
-          difficulty:
-            nextQuestion.difficulty
-        },
-
-        history:
-          updatedHistory
+          id: nextQuestion.id,
+          category: nextQuestion.category,
+          question_text: nextQuestion.question_text,
+          option1: nextQuestion.option1,
+          option2: nextQuestion.option2,
+          option3: nextQuestion.option3,
+          option4: nextQuestion.option4,
+          image_url: nextQuestion.image_url,
+          difficulty: nextQuestion.difficulty
+        }
       });
 
     } catch (err) {
-
       if (client) {
         try {
-          await client.query(
-            'ROLLBACK'
-          );
-        } catch (
-          rollbackErr
-        ) {
-          logger.error(
-            "CAT ROLLBACK失敗",
-            {
-              error:
-                rollbackErr.message
-            }
-          );
+          await client.query('ROLLBACK');
+        } catch (rollbackErr) {
+          logger.error('CAT ROLLBACK失敗', {
+            error: rollbackErr.message
+          });
         }
       }
 
-      logger.error(
-        "CAT解答処理エラー",
-        {
-          error:
-            err.message
-        }
-      );
+      logger.error('CAT解答処理エラー', {
+        error: err.message
+      });
 
       res.status(500).json({
-        error:
-          "CAT解答処理に失敗しました。"
+        error: 'CAT解答処理に失敗しました。'
       });
 
     } finally {
-
       if (client) {
         client.release();
       }
