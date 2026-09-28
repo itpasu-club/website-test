@@ -257,6 +257,78 @@
     }
 
     .score-badge { font-size: 3.5rem; color: var(--primary-color); font-weight: bold; margin: 15px 0; }
+
+    /* IRT能力推定カード */
+    .irt-card {
+      max-width: 760px;
+      margin: 25px auto;
+      padding: 20px;
+      background: #f8fbff;
+      border: 1px solid #b8daff;
+      border-radius: 10px;
+      text-align: left;
+    }
+
+    .irt-card h3 {
+      margin-top: 0;
+      color: var(--primary-color);
+      text-align: center;
+    }
+
+    .irt-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 12px;
+      margin-top: 15px;
+    }
+
+    .irt-item {
+      background: #fff;
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 14px;
+    }
+
+    .irt-label {
+      display: block;
+      font-size: 0.85rem;
+      color: #666;
+      margin-bottom: 5px;
+    }
+
+    .irt-value {
+      font-size: 1.25rem;
+      font-weight: bold;
+      color: #333;
+    }
+
+    .irt-note {
+      margin-top: 15px;
+      font-size: 0.85rem;
+      line-height: 1.6;
+      color: #666;
+      background: #fff;
+      padding: 10px 12px;
+      border-radius: 6px;
+    }
+
+    .confidence-high {
+      color: var(--success-color);
+    }
+
+    .confidence-medium {
+      color: #856404;
+    }
+
+    .confidence-low {
+      color: var(--danger-color);
+    }
+
+    @media (max-width: 600px) {
+      .irt-grid {
+        grid-template-columns: 1fr;
+      }
+    }
     .history-table { width: 100%; border-collapse: collapse; margin-top: 20px; }
     .history-table th, .history-table td { padding: 10px; border: 1px solid var(--border-color); text-align: center; }
     .history-table th { background: var(--gray-bg); }
@@ -481,6 +553,37 @@
       </div>
       
       <p>正解数: <span id="correct-val">0</span> / <span id="total-val">0</span> 問</p>
+
+      <div id="irt-result-card" class="irt-card" style="display:none;">
+        <h3>🎯 能力推定</h3>
+
+        <div class="irt-grid">
+          <div class="irt-item">
+            <span class="irt-label">推定能力 θ</span>
+            <span class="irt-value" id="irt-theta">-</span>
+          </div>
+
+          <div class="irt-item">
+            <span class="irt-label">推定の不確実性</span>
+            <span class="irt-value" id="irt-se">-</span>
+          </div>
+
+          <div class="irt-item">
+            <span class="irt-label">95%信用区間</span>
+            <span class="irt-value" id="irt-interval">-</span>
+          </div>
+
+          <div class="irt-item">
+            <span class="irt-label">推定信頼度</span>
+            <span class="irt-value" id="irt-confidence">-</span>
+          </div>
+        </div>
+
+        <div class="irt-note">
+          ※ 推定能力 θ は、今回の解答結果から推定した能力値です。<br>
+          ※ 推定信頼度は「合格する確率」ではなく、能力推定の不確実性を表すアプリ独自の指標です。
+        </div>
+      </div>
 
       <div id="review-section" class="review-section">
         <h3 style="border-bottom: 2px solid var(--primary-color); padding-bottom: 8px; margin-bottom: 20px;">問題の振り返り・解説</h3>
@@ -1079,6 +1182,8 @@
       document.getElementById('correct-val').textContent = data.correctCount;
       document.getElementById('total-val').textContent = data.totalCount;
 
+      renderIRTResult(data);
+
       const reviewList = document.getElementById('review-list');
       reviewList.innerHTML = '';
 
@@ -1327,6 +1432,67 @@
       }
     }
 
+    function renderIRTResult(data) {
+      const card = document.getElementById('irt-result-card');
+
+      if (!card) return;
+
+      const theta = Number(data.theta);
+      const standardError = Number(data.standardError);
+      const confidence = Number(data.confidence);
+
+      const interval = data.credibleInterval95;
+
+      if (
+        !Number.isFinite(theta) ||
+        !Number.isFinite(standardError)
+      ) {
+        card.style.display = 'none';
+        return;
+      }
+
+      document.getElementById('irt-theta').textContent =
+        theta.toFixed(3);
+
+      document.getElementById('irt-se').textContent =
+        '±' + standardError.toFixed(3);
+
+      if (
+        interval &&
+        Number.isFinite(Number(interval.lower)) &&
+        Number.isFinite(Number(interval.upper))
+      ) {
+        document.getElementById('irt-interval').textContent =
+          `${Number(interval.lower).toFixed(3)} ～ ${Number(interval.upper).toFixed(3)}`;
+      } else {
+        document.getElementById('irt-interval').textContent = '-';
+      }
+
+      const confidenceElement =
+        document.getElementById('irt-confidence');
+
+      if (Number.isFinite(confidence)) {
+        const level = String(data.confidenceLevel || '');
+
+        confidenceElement.textContent =
+          `${confidence.toFixed(0)}%${level ? `（${level}）` : ''}`;
+
+        confidenceElement.className = 'irt-value';
+
+        if (level === '高') {
+          confidenceElement.classList.add('confidence-high');
+        } else if (level === '中') {
+          confidenceElement.classList.add('confidence-medium');
+        } else {
+          confidenceElement.classList.add('confidence-low');
+        }
+      } else {
+        confidenceElement.textContent = '-';
+      }
+
+      card.style.display = 'block';
+    }
+
     function renderStandardResult(data) {
       switchScreen('result-screen');
       document.getElementById('result-user-id').textContent = currentUsername;
@@ -1334,6 +1500,8 @@
       document.getElementById('max-score-val').textContent = data.maxScore;
       document.getElementById('correct-val').textContent = data.correctCount;
       document.getElementById('total-val').textContent = data.totalCount;
+
+      renderIRTResult(data);
 
       const reviewList = document.getElementById('review-list');
       reviewList.innerHTML = '';

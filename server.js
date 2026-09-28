@@ -1943,6 +1943,24 @@ app.post(
 
         totalCount,
 
+        theta:
+          irtResult.theta,
+
+        posteriorVariance:
+          irtResult.posteriorVariance,
+
+        standardError:
+          irtResult.standardError,
+
+        credibleInterval95:
+          irtResult.credibleInterval95,
+
+        confidence:
+          irtResult.confidence,
+
+        confidenceLevel:
+          irtResult.confidenceLevel,
+
         details
       });
 
@@ -2338,6 +2356,12 @@ app.post(
           maxScore: 1000,
           correctCount,
           totalCount: totalSteps,
+          theta: irtResult.theta,
+          posteriorVariance: irtResult.posteriorVariance,
+          standardError: irtResult.standardError,
+          credibleInterval95: irtResult.credibleInterval95,
+          confidence: irtResult.confidence,
+          confidenceLevel: irtResult.confidenceLevel,
           currentTheta,
           lastAnswerCorrect: isCorrect === 1,
           explanation: currentQ.explanation || '',
@@ -2743,22 +2767,28 @@ function calculateIRTScore(
   responses,
   questions
 ) {
-  const numNodes = 81;
+  // ============================================================
+  // IRT採点
+  // 3PLモデル + EAP
+  //
+  // 追加:
+  //   posteriorVariance : 事後分散
+  //   standardError     : EAP事後標準偏差
+  //   credibleInterval95: 95%事後信用区間
+  //   confidence        : 推定信頼度
+  // ============================================================
 
+  const numNodes = 81;
   const nodes = [];
   const posteriors = [];
 
-  for (
-    let i = 0;
-    i < numNodes;
-    i++
-  ) {
-    const theta =
-      -4.0 +
-      i * 0.1;
+  // θ = -4.0 ～ +4.0
+  for (let i = 0; i < numNodes; i++) {
+    const theta = -4.0 + i * 0.1;
 
     nodes.push(theta);
 
+    // 標準正規分布 N(0,1) を事前分布として使用
     posteriors.push(
       Math.exp(
         -0.5 *
@@ -2768,21 +2798,45 @@ function calculateIRTScore(
     );
   }
 
-  let sumPosterior =
-    posteriors.reduce(
-      (a, b) =>
-        a + b,
-      0
-    );
+  // ------------------------------------------------------------
+  // 事前分布を正規化
+  // ------------------------------------------------------------
 
-  for (
-    let i = 0;
-    i < numNodes;
-    i++
-  ) {
-    posteriors[i] /=
-      sumPosterior;
+  let priorSum = posteriors.reduce(
+    (sum, value) => sum + value,
+    0
+  );
+
+  for (let i = 0; i < numNodes; i++) {
+    posteriors[i] /= priorSum;
   }
+
+  // 事前分布の平均
+  let priorMean = 0;
+
+  for (let i = 0; i < numNodes; i++) {
+    priorMean +=
+      nodes[i] *
+      posteriors[i];
+  }
+
+  // 事前分布の分散
+  let priorVariance = 0;
+
+  for (let i = 0; i < numNodes; i++) {
+    const diff =
+      nodes[i] -
+      priorMean;
+
+    priorVariance +=
+      diff *
+      diff *
+      posteriors[i];
+  }
+
+  // ------------------------------------------------------------
+  // 3PLモデル
+  // ------------------------------------------------------------
 
   const c = 0.25;
 
@@ -2796,14 +2850,14 @@ function calculateIRTScore(
 
     const b =
       Number(
-        questions[i].difficulty ??
-        0
+        questions[i].difficulty ?? 0
       );
 
+    // 現在はデータ不足を考慮し、
+    // 識別力は基本1.0を使用
     const a =
       Number(
-        questions[i].discrimination ||
-        1.0
+        questions[i].discrimination || 1.0
       );
 
     for (
@@ -2836,42 +2890,157 @@ function calculateIRTScore(
     }
   }
 
-  sumPosterior =
+  // ------------------------------------------------------------
+  // 事後分布を正規化
+  // ------------------------------------------------------------
+
+  const posteriorSum =
     posteriors.reduce(
-      (a, b) =>
-        a + b,
+      (sum, value) =>
+        sum + value,
       0
     );
 
   if (
-    sumPosterior === 0 ||
-    !Number.isFinite(
-      sumPosterior
-    )
+    posteriorSum === 0 ||
+    !Number.isFinite(posteriorSum)
   ) {
     return {
-      theta:
-        -3.0,
+      theta: -3.0,
+      score: 100,
 
-      score:
-        100
+      posteriorVariance:
+        priorVariance,
+
+      standardError:
+        Math.sqrt(priorVariance),
+
+      credibleInterval95: {
+        lower: -4.0,
+        upper: 4.0
+      },
+
+      confidence: 0,
+      confidenceLevel: "低"
     };
   }
 
+  for (let i = 0; i < numNodes; i++) {
+    posteriors[i] /=
+      posteriorSum;
+  }
+
+  // ------------------------------------------------------------
+  // EAP
+  // ------------------------------------------------------------
+
   let thetaEAP = 0;
 
-  for (
-    let j = 0;
-    j < numNodes;
-    j++
-  ) {
-    posteriors[j] /=
-      sumPosterior;
-
+  for (let i = 0; i < numNodes; i++) {
     thetaEAP +=
-      nodes[j] *
-      posteriors[j];
+      nodes[i] *
+      posteriors[i];
   }
+
+  // ------------------------------------------------------------
+  // Posterior Variance
+  // ------------------------------------------------------------
+
+  let posteriorVariance = 0;
+
+  for (let i = 0; i < numNodes; i++) {
+    const diff =
+      nodes[i] -
+      thetaEAP;
+
+    posteriorVariance +=
+      diff *
+      diff *
+      posteriors[i];
+  }
+
+  posteriorVariance =
+    Math.max(
+      0,
+      posteriorVariance
+    );
+
+  // ------------------------------------------------------------
+  // Standard Error
+  //
+  // EAPでは事後標準偏差を
+  // 能力推定の不確実性の指標として使用
+  // ------------------------------------------------------------
+
+  const standardError =
+    Math.sqrt(
+      posteriorVariance
+    );
+
+  // ------------------------------------------------------------
+  // 95%事後信用区間
+  // ------------------------------------------------------------
+
+  const intervalMargin =
+    1.96 *
+    standardError;
+
+  const credibleLower =
+    Math.max(
+      -4.0,
+      thetaEAP -
+        intervalMargin
+    );
+
+  const credibleUpper =
+    Math.min(
+      4.0,
+      thetaEAP +
+        intervalMargin
+    );
+
+  // ------------------------------------------------------------
+  // 推定信頼度
+  //
+  // 事前分散からどれだけ事後分散が
+  // 小さくなったかを利用する。
+  //
+  // ※合格確率ではない
+  // ------------------------------------------------------------
+
+  const varianceReduction =
+    priorVariance > 0
+      ? 1 -
+        (
+          posteriorVariance /
+          priorVariance
+        )
+      : 0;
+
+  const confidence =
+    Math.round(
+      Math.max(
+        0,
+        Math.min(
+          100,
+          varianceReduction *
+            100
+        )
+      )
+    );
+
+  let confidenceLevel =
+    "低";
+
+  if (confidence >= 75) {
+    confidenceLevel = "高";
+  } else if (confidence >= 45) {
+    confidenceLevel = "中";
+  }
+
+  // ------------------------------------------------------------
+  // 既存スコアとの互換性を維持
+  // ------------------------------------------------------------
 
   const rawScore =
     Math.round(
@@ -2896,7 +3065,33 @@ function calculateIRTScore(
       ),
 
     score:
-      scaledScore
+      scaledScore,
+
+    posteriorVariance:
+      Number(
+        posteriorVariance.toFixed(4)
+      ),
+
+    standardError:
+      Number(
+        standardError.toFixed(4)
+      ),
+
+    credibleInterval95: {
+      lower:
+        Number(
+          credibleLower.toFixed(3)
+        ),
+
+      upper:
+        Number(
+          credibleUpper.toFixed(3)
+        )
+    },
+
+    confidence,
+
+    confidenceLevel
   };
 }
 
