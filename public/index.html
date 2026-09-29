@@ -583,6 +583,32 @@
           ※ 推定能力 θ は、今回の解答結果から推定した能力値です。<br>
           ※ 推定信頼度は「合格する確率」ではなく、能力推定の不確実性を表すアプリ独自の指標です。
         </div>
+
+        <div class="category-irt-section">
+          <h4>📊 分野別能力</h4>
+
+          <div class="irt-grid">
+            <div class="irt-item">
+              <span class="irt-label">ストラテジ</span>
+              <span class="irt-value" id="category-irt-strategy">-</span>
+            </div>
+
+            <div class="irt-item">
+              <span class="irt-label">マネジメント</span>
+              <span class="irt-value" id="category-irt-management">-</span>
+            </div>
+
+            <div class="irt-item">
+              <span class="irt-label">テクノロジ</span>
+              <span class="irt-value" id="category-irt-technology">-</span>
+            </div>
+          </div>
+
+          <div class="irt-note">
+            ※ 各分野の能力値 θ は、その分野の解答結果から独立して推定した値です。<br>
+            ※ 分野別能力値から総合能力 θ を算出しているわけではありません。
+          </div>
+        </div>
       </div>
 
       <div id="review-section" class="review-section">
@@ -1488,6 +1514,31 @@
         }
       } else {
         confidenceElement.textContent = '-';
+      }
+
+      // 分野別IRT
+      const categoryIRT = data.categoryIRT || {};
+
+      const categoryElements = {
+        'ストラテジ': document.getElementById('category-irt-strategy'),
+        'マネジメント': document.getElementById('category-irt-management'),
+        'テクノロジ': document.getElementById('category-irt-technology')
+      };
+
+      for (const [category, element] of Object.entries(categoryElements)) {
+        if (!element) continue;
+
+        const result = categoryIRT[category];
+
+        if (
+          result &&
+          Number.isFinite(Number(result.theta))
+        ) {
+          element.textContent =
+            `θ = ${Number(result.theta).toFixed(3)}（${Number(result.answerCount) || 0}問）`;
+        } else {
+          element.textContent = '-';
+        }
       }
 
       card.style.display = 'block';

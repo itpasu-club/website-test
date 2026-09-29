@@ -1795,7 +1795,10 @@ app.post(
               ),
 
             discrimination:
-              1.0
+              1.0,
+
+            category:
+              getMajorCategory(q.category)
           })
         );
 
@@ -1837,6 +1840,12 @@ app.post(
 
       const irtResult =
         calculateIRTScore(
+          responses,
+          questionParams
+        );
+
+      const categoryIRT =
+        calculateCategoryIRTScore(
           responses,
           questionParams
         );
@@ -1960,6 +1969,8 @@ app.post(
 
         confidenceLevel:
           irtResult.confidenceLevel,
+
+        categoryIRT,
 
         details
       });
@@ -2257,6 +2268,7 @@ app.post(
           isCorrect,
           difficulty: originalDifficulty,
           discrimination: 1.0,
+          category: getMajorCategory(currentQ.category),
           userAnswer: numericAnswer,
           correctOption: Number(currentQ.correct_option),
           explanation: currentQ.explanation || ''
@@ -2270,7 +2282,8 @@ app.post(
       const questionParams = updatedHistory.map(
         h => ({
           difficulty: Number(h.difficulty ?? 0),
-          discrimination: Number(h.discrimination || 1)
+          discrimination: Number(h.discrimination || 1),
+          category: h.category || null
         })
       );
 
@@ -2278,6 +2291,12 @@ app.post(
         responses,
         questionParams
       );
+
+      const categoryIRT =
+        calculateCategoryIRTScore(
+          responses,
+          questionParams
+        );
 
       const currentTheta = irtResult.theta;
       const totalSteps = 20;
@@ -2362,6 +2381,7 @@ app.post(
           credibleInterval95: irtResult.credibleInterval95,
           confidence: irtResult.confidence,
           confidenceLevel: irtResult.confidenceLevel,
+          categoryIRT,
           currentTheta,
           lastAnswerCorrect: isCorrect === 1,
           explanation: currentQ.explanation || '',
@@ -2762,6 +2782,89 @@ app.get(
 // ============================================================
 // IRT採点
 // ============================================================
+
+// ============================================================
+// 分野別IRT
+//
+// 総合θとは独立して、
+// ストラテジ / マネジメント / テクノロジ
+// の3分野をそれぞれIRTで推定する。
+//
+// ※分野別θから総合θは計算しない。
+// ============================================================
+
+function calculateCategoryIRTScore(
+  responses,
+  questionParams
+) {
+  const majorCategories = [
+    'ストラテジ',
+    'マネジメント',
+    'テクノロジ'
+  ];
+
+  const result = {};
+
+  for (const major of majorCategories) {
+    const categoryResponses = [];
+    const categoryQuestions = [];
+
+    for (let i = 0; i < questionParams.length; i++) {
+      const param = questionParams[i];
+
+      if (
+        param &&
+        param.category === major
+      ) {
+        categoryResponses.push(
+          responses[i]
+        );
+
+        categoryQuestions.push({
+          difficulty:
+            Number(param.difficulty ?? 0),
+
+          discrimination:
+            Number(param.discrimination || 1)
+        });
+      }
+    }
+
+    if (categoryResponses.length === 0) {
+      result[major] = null;
+      continue;
+    }
+
+    const irt = calculateIRTScore(
+      categoryResponses,
+      categoryQuestions
+    );
+
+    result[major] = {
+      theta: irt.theta,
+
+      posteriorVariance:
+        irt.posteriorVariance,
+
+      standardError:
+        irt.standardError,
+
+      credibleInterval95:
+        irt.credibleInterval95,
+
+      confidence:
+        irt.confidence,
+
+      confidenceLevel:
+        irt.confidenceLevel,
+
+      answerCount:
+        categoryResponses.length
+    };
+  }
+
+  return result;
+}
 
 function calculateIRTScore(
   responses,
