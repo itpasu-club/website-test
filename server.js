@@ -1970,6 +1970,12 @@ app.post(
         confidenceLevel:
           irtResult.confidenceLevel,
 
+        probabilityTheta0:
+          irtResult.probabilityTheta0,
+
+        probabilityThetaMinus2:
+          irtResult.probabilityThetaMinus2,
+
         categoryIRT,
 
         details
@@ -2381,6 +2387,8 @@ app.post(
           credibleInterval95: irtResult.credibleInterval95,
           confidence: irtResult.confidence,
           confidenceLevel: irtResult.confidenceLevel,
+          probabilityTheta0: irtResult.probabilityTheta0,
+          probabilityThetaMinus2: irtResult.probabilityThetaMinus2,
           categoryIRT,
           currentTheta,
           lastAnswerCorrect: isCorrect === 1,
@@ -3034,6 +3042,30 @@ function calculateIRTScore(
   }
 
   // ------------------------------------------------------------
+  // 合格基準に対応する事後確率
+  //
+  // このアプリ独自のスコア変換では、
+  //   総合600点  -> theta >= 0
+  //   分野300点  -> theta >= -2
+  //
+  // ------------------------------------------------------------
+
+  let probabilityTheta0 = 0;
+  let probabilityThetaMinus2 = 0;
+
+  for (let i = 0; i < numNodes; i++) {
+    if (nodes[i] >= 0) {
+      probabilityTheta0 +=
+        posteriors[i];
+    }
+
+    if (nodes[i] >= -2) {
+      probabilityThetaMinus2 +=
+        posteriors[i];
+    }
+  }
+
+  // ------------------------------------------------------------
   // EAP
   // ------------------------------------------------------------
 
@@ -3194,7 +3226,24 @@ function calculateIRTScore(
 
     confidence,
 
-    confidenceLevel
+    confidenceLevel,
+
+    // アプリ独自IRTモデルによる基準到達確率
+    probabilityTheta0:
+      Number(
+        (
+          probabilityTheta0 *
+          100
+        ).toFixed(1)
+      ),
+
+    probabilityThetaMinus2:
+      Number(
+        (
+          probabilityThetaMinus2 *
+          100
+        ).toFixed(1)
+      )
   };
 }
 

@@ -609,6 +609,43 @@
             ※ 分野別能力値から総合能力 θ を算出しているわけではありません。
           </div>
         </div>
+
+        <div class="category-irt-section">
+          <h4>📈 合格基準到達の推定確率</h4>
+
+          <div class="irt-grid">
+            <div class="irt-item">
+              <span class="irt-label">総合600点以上</span>
+              <span class="irt-value" id="probability-overall">-</span>
+            </div>
+
+            <div class="irt-item">
+              <span class="irt-label">ストラテジ300点以上</span>
+              <span class="irt-value" id="probability-strategy">-</span>
+            </div>
+
+            <div class="irt-item">
+              <span class="irt-label">マネジメント300点以上</span>
+              <span class="irt-value" id="probability-management">-</span>
+            </div>
+
+            <div class="irt-item">
+              <span class="irt-label">テクノロジ300点以上</span>
+              <span class="irt-value" id="probability-technology">-</span>
+            </div>
+
+            <div class="irt-item">
+              <span class="irt-label">4基準すべて</span>
+              <span class="irt-value" id="probability-all">-</span>
+            </div>
+          </div>
+
+          <div class="irt-note">
+            ※ これはIPAが公表している合格確率ではありません。<br>
+            ※ このアプリ独自のIRTモデルから、各基準に到達する確率を推定したものです。<br>
+            ※「4基準すべて」は各確率を独立と仮定した近似値です。
+          </div>
+        </div>
       </div>
 
       <div id="review-section" class="review-section">
@@ -1538,6 +1575,69 @@
             `θ = ${Number(result.theta).toFixed(3)}（${Number(result.answerCount) || 0}問）`;
         } else {
           element.textContent = '-';
+        }
+      }
+
+      // 合格基準到達の推定確率
+      const probabilityOverall =
+        Number(data.probabilityTheta0);
+
+      const probabilityStrategy =
+        Number(categoryIRT['ストラテジ']?.probabilityThetaMinus2);
+
+      const probabilityManagement =
+        Number(categoryIRT['マネジメント']?.probabilityThetaMinus2);
+
+      const probabilityTechnology =
+        Number(categoryIRT['テクノロジ']?.probabilityThetaMinus2);
+
+      const probabilityElements = {
+        'probability-overall': probabilityOverall,
+        'probability-strategy': probabilityStrategy,
+        'probability-management': probabilityManagement,
+        'probability-technology': probabilityTechnology
+      };
+
+      for (
+        const [id, probability] of Object.entries(probabilityElements)
+      ) {
+        const element = document.getElementById(id);
+
+        if (!element) continue;
+
+        element.textContent =
+          Number.isFinite(probability)
+            ? `${probability.toFixed(1)}%`
+            : '-';
+      }
+
+      const probabilityAllElement =
+        document.getElementById('probability-all');
+
+      if (probabilityAllElement) {
+        const probabilities = [
+          probabilityOverall,
+          probabilityStrategy,
+          probabilityManagement,
+          probabilityTechnology
+        ];
+
+        if (
+          probabilities.every(
+            value => Number.isFinite(value)
+          )
+        ) {
+          const probabilityAll =
+            probabilities.reduce(
+              (product, value) =>
+                product * (value / 100),
+              1
+            ) * 100;
+
+          probabilityAllElement.textContent =
+            `${probabilityAll.toFixed(1)}%`;
+        } else {
+          probabilityAllElement.textContent = '-';
         }
       }
 
