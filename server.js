@@ -2866,6 +2866,9 @@ function calculateCategoryIRTScore(
       confidenceLevel:
         irt.confidenceLevel,
 
+      probabilityThetaMinus2:
+        irt.probabilityThetaMinus2,
+
       answerCount:
         categoryResponses.length
     };
