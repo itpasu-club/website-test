@@ -9,6 +9,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const cors = require('cors');
 const crypto = require('crypto');
+const { performance } = require('perf_hooks');
 
 const app = express();
 app.set('trust proxy', 1);
@@ -136,6 +137,24 @@ async function timedQuery(executor, sql, params = [], label = 'DB') {
 
     throw err;
   }
+}
+
+// ============================================================
+// API性能計測
+// ============================================================
+
+function logPerformance(label, startedAt, meta = {}) {
+  const elapsedMs = Number(
+    (performance.now() - startedAt).toFixed(2)
+  );
+
+  logger.info('[PERF]', {
+    label,
+    elapsedMs,
+    ...meta
+  });
+
+  return elapsedMs;
 }
 
 // ============================================================
@@ -867,7 +886,8 @@ function selectFullExamQuestions(
 function selectAdaptiveQuestion(
   candidates,
   usedIds,
-  theta
+  theta,
+  standardError = 1.0
 ) {
   const available =
     candidates.filter(
@@ -879,6 +899,19 @@ function selectAdaptiveQuestion(
   ) {
     return null;
   }
+
+  // 信頼度が低いほど、theta付近の探索範囲を少し広げる。
+  // 現在のCAT選択ロジックを大きく変えないため、最大0.2まで。
+  const se = Math.max(
+    0,
+    Number(standardError) || 0
+  );
+
+  const explorationRange =
+    Math.min(
+      0.2,
+      se * 0.15
+    );
 
   let bestDistance =
     Infinity;
@@ -902,8 +935,7 @@ function selectAdaptiveQuestion(
       distance <
       bestDistance
     ) {
-      bestDistance =
-        distance;
+      bestDistance = distance;
 
       bestQuestions = [
         question
@@ -924,6 +956,44 @@ function selectAdaptiveQuestion(
     return available[0];
   }
 
+  // 信頼度が低い場合は、最も近い問題だけでなく
+  // 「最短距離 + 許容幅」の問題からランダムに選ぶ。
+  if (
+    explorationRange > 0
+  ) {
+    const nearBestQuestions =
+      available.filter(
+        question => {
+          const difficulty =
+            Number(
+              question.difficulty ?? 0
+            );
+
+          const distance =
+            Math.abs(
+              difficulty - theta
+            );
+
+          return (
+            distance <=
+            bestDistance +
+              explorationRange
+          );
+        }
+      );
+
+    if (
+      nearBestQuestions.length > 0
+    ) {
+      return nearBestQuestions[
+        Math.floor(
+          Math.random() *
+          nearBestQuestions.length
+        )
+      ];
+    }
+  }
+
   return bestQuestions[
     Math.floor(
       Math.random() *
@@ -940,6 +1010,7 @@ app.post(
   '/api/register',
   strictLimiter,
   async (req, res) => {
+    const perfStartedAt = performance.now();
     try {
       const {
         username,
@@ -1073,6 +1144,7 @@ app.post(
   '/api/login',
   strictLimiter,
   async (req, res) => {
+    const perfStartedAt = performance.now();
     try {
       const {
         username,
@@ -1235,6 +1307,7 @@ app.get(
 app.get(
   '/api/questions',
   async (req, res) => {
+    const perfStartedAt = performance.now();
     try {
       const {
         category,
@@ -1592,6 +1665,7 @@ app.post(
   strictLimiter,
   authenticateToken,
   async (req, res) => {
+    const perfStartedAt = performance.now();
 
     let client = null;
 
@@ -2035,6 +2109,7 @@ app.post(
   strictLimiter,
   authenticateToken,
   async (req, res) => {
+    const perfStartedAt = performance.now();
     try {
       const { category } = req.body;
       const authUserId = req.user.username;
@@ -2144,6 +2219,7 @@ app.post(
   '/api/cat/answer',
   authenticateToken,
   async (req, res) => {
+    const perfStartedAt = performance.now();
 
     let client = null;
 
@@ -2305,6 +2381,7 @@ app.post(
         );
 
       const currentTheta = irtResult.theta;
+      const standardError = irtResult.standardError;
       const totalSteps = 20;
 
       // ======================================================
@@ -2440,14 +2517,16 @@ app.post(
       let nextQuestion = selectAdaptiveQuestion(
         candidates,
         usedIds,
-        currentTheta
+        currentTheta,
+        standardError
       );
 
       if (!nextQuestion) {
         nextQuestion = selectAdaptiveQuestion(
           questionCache,
           usedIds,
-          currentTheta
+          currentTheta,
+          standardError
         );
       }
 
@@ -2498,6 +2577,11 @@ app.post(
         currentQ.id,
         isCorrect
       );
+
+      logPerformance('POST /api/cat/answer', perfStartedAt, {
+        step: nextStep,
+        finished: false
+      });
 
       res.json({
         isFinished: false,
@@ -2559,6 +2643,7 @@ app.get(
   '/api/analytics',
   authenticateToken,
   async (req, res) => {
+    const perfStartedAt = performance.now();
     try {
       const authUserId =
         req.user.username;
@@ -2737,6 +2822,7 @@ app.get(
   '/api/history',
   authenticateToken,
   async (req, res) => {
+    const perfStartedAt = performance.now();
     try {
       const authUserId =
         req.user.username;
