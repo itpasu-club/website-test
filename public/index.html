@@ -456,6 +456,7 @@
             <option value="standard" selected="">✨ 未回答優先 ＋ 直近回答回避（標準）</option>
             <option value="weakness">🔥 弱点・苦手克服（誤答・未回答を優先）</option>
             <option value="cat">🎯 CAT適応型能力テスト（全20問）</option>
+            <option value="cat-extended">🔬 CAT詳細型能力テスト（最大40問）</option>
           </select>
         </div>
 
@@ -804,7 +805,7 @@
       const countGroup = document.getElementById('count-group');
       const timerGroup = document.getElementById('timer-group');
 
-      const isCat = mode === 'cat';
+      const isCat = mode === 'cat' || mode === 'cat-extended';
       countGroup.style.display = isCat ? 'none' : 'block';
       timerGroup.style.display = isCat ? 'none' : 'block';
     }
@@ -1034,7 +1035,7 @@
       selectedCategory = document.getElementById('category-select').value;
       const mode = document.getElementById('mode-select').value;
 
-      if (mode === 'cat') {
+      if (mode === 'cat' || mode === 'cat-extended') {
         await startCatQuiz();
         return;
       }
@@ -1093,10 +1094,18 @@
       document.getElementById('timer-display').classList.remove('warning');
 
       try {
+        const modeValue = document.getElementById('mode-select').value;
+        const catMode = modeValue === 'cat-extended'
+          ? 'extended'
+          : 'standard';
+
         const res = await fetchWithAuth('/api/cat/start', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ category: selectedCategory })
+          body: JSON.stringify({
+            category: selectedCategory,
+            mode: catMode
+          })
         });
 
         const data = await res.json();

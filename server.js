@@ -182,6 +182,7 @@ async function initDb() {
     '  session_id UUID PRIMARY KEY,',
     '  user_id VARCHAR(50) NOT NULL,',
     '  category VARCHAR(50) NOT NULL,',
+    "  mode VARCHAR(20) NOT NULL DEFAULT 'standard',",
     '  step INT NOT NULL DEFAULT 1,',
     '  current_question_id INT NOT NULL,',
     "  history JSONB NOT NULL DEFAULT '[]'::jsonb,",
@@ -207,6 +208,7 @@ async function initDb() {
     ');',
 
     'ALTER TABLE user_answers ADD COLUMN IF NOT EXISTS is_correct INT DEFAULT 0;',
+    "ALTER TABLE cat_sessions ADD COLUMN IF NOT EXISTS mode VARCHAR(20) NOT NULL DEFAULT 'standard';",
     'ALTER TABLE user_answers ADD COLUMN IF NOT EXISTS answered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;',
 
     'CREATE INDEX IF NOT EXISTS idx_results_user_id_id',
@@ -2111,7 +2113,11 @@ app.post(
   async (req, res) => {
     const perfStartedAt = performance.now();
     try {
-      const { category } = req.body;
+      const { category, mode } = req.body;
+      const catMode =
+        mode === 'extended'
+          ? 'extended'
+          : 'standard';
       const authUserId = req.user.username;
 
       let candidates;
@@ -2164,16 +2170,18 @@ app.post(
             session_id,
             user_id,
             category,
+            mode,
             step,
             current_question_id,
             history
           )
-          VALUES ($1, $2, $3, 1, $4, '[]'::jsonb)
+          VALUES ($1, $2, $3, $4, 1, $5, '[]'::jsonb)
         `,
         [
           sessionId,
           authUserId,
           category || 'all',
+          catMode,
           question.id
         ],
         'cat.createSession'
@@ -2182,7 +2190,7 @@ app.post(
       res.json({
         sessionId,
         step: 1,
-        totalSteps: 20,
+        totalSteps: catMode === 'extended' ? 40 : 20,
         question: {
           id: question.id,
           category: question.category,
@@ -2266,6 +2274,7 @@ app.post(
             session_id,
             user_id,
             category,
+            mode,
             step,
             current_question_id,
             history
@@ -2286,13 +2295,16 @@ app.post(
       }
 
       const session = sessionRes.rows[0];
+      const isExtended = session.mode === 'extended';
+      const maxSteps = isExtended ? 40 : 20;
+
       const history = Array.isArray(session.history)
         ? session.history
         : [];
 
       if (
         history.length !== Number(session.step) - 1 ||
-        history.length >= 20
+        history.length >= maxSteps
       ) {
         await client.query('ROLLBACK');
         return res.status(409).json({
@@ -2382,13 +2394,21 @@ app.post(
 
       const currentTheta = irtResult.theta;
       const standardError = irtResult.standardError;
-      const totalSteps = 20;
+      const minSteps = 20;
+      const targetStandardError = 0.35;
+      const shouldFinish =
+        updatedHistory.length >= maxSteps ||
+        (
+          isExtended &&
+          updatedHistory.length >= minSteps &&
+          standardError <= targetStandardError
+        );
 
       // ======================================================
       // CAT終了
       // ======================================================
 
-      if (updatedHistory.length >= totalSteps) {
+      if (shouldFinish) {
         const correctCount = updatedHistory.filter(
           h => h.isCorrect === 1
         ).length;
@@ -2423,7 +2443,7 @@ app.post(
             1000,
             categoryName,
             correctCount,
-            totalSteps
+            updatedHistory.length
           ],
           'cat.insertResult'
         );
@@ -2457,7 +2477,7 @@ app.post(
           score: finalScore,
           maxScore: 1000,
           correctCount,
-          totalCount: totalSteps,
+          totalCount: updatedHistory.length,
           theta: irtResult.theta,
           posteriorVariance: irtResult.posteriorVariance,
           standardError: irtResult.standardError,
@@ -2586,7 +2606,7 @@ app.post(
       res.json({
         isFinished: false,
         step: nextStep,
-        totalSteps,
+        totalSteps: maxSteps,
         currentTheta,
         lastAnswerCorrect: isCorrect === 1,
         explanation: currentQ.explanation || '',
