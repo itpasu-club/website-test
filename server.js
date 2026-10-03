@@ -1804,23 +1804,29 @@ app.post(
             q.id
           );
 
-        qIds.push(q.id);
-        qCorrects.push(
-          isCorrect
-        );
-        qFirstTimes.push(
-          isFirstTime ? 1 : 0
-        );
+        // 未回答は採点上は不正解だが、
+        // 問題統計・ユーザー回答履歴には記録しない。
+        if (
+          userAnswer !== undefined
+        ) {
+          qIds.push(q.id);
+          qCorrects.push(
+            isCorrect
+          );
+          qFirstTimes.push(
+            isFirstTime ? 1 : 0
+          );
 
-        uUsers.push(
-          authUserId
-        );
-        uQIds.push(
-          q.id
-        );
-        uCorrects.push(
-          isCorrect
-        );
+          uUsers.push(
+            authUserId
+          );
+          uQIds.push(
+            q.id
+          );
+          uCorrects.push(
+            isCorrect
+          );
+        }
 
         details.push({
           id: q.id,
@@ -2504,12 +2510,47 @@ app.post(
       if (!session.category || session.category === 'all') {
         const nextStep = updatedHistory.length;
 
-        if (nextStep < 6) {
-          targetMajor = 'ストラテジ';
-        } else if (nextStep < 10) {
-          targetMajor = 'マネジメント';
+        if (session.mode === 'extended') {
+          const targetCounts = {
+            'ストラテジ': 12,
+            'マネジメント': 8,
+            'テクノロジ': 20
+          };
+
+          const actualCounts = {
+            'ストラテジ': updatedHistory.filter(
+              h => h.category === 'ストラテジ'
+            ).length,
+            'マネジメント': updatedHistory.filter(
+              h => h.category === 'マネジメント'
+            ).length,
+            'テクノロジ': updatedHistory.filter(
+              h => h.category === 'テクノロジ'
+            ).length
+          };
+
+          targetMajor = Object.keys(targetCounts).reduce(
+            (best, major) => {
+              const bestDeficit =
+                targetCounts[best] - actualCounts[best];
+
+              const currentDeficit =
+                targetCounts[major] - actualCounts[major];
+
+              return currentDeficit > bestDeficit
+                ? major
+                : best;
+            },
+            'ストラテジ'
+          );
         } else {
-          targetMajor = 'テクノロジ';
+          if (nextStep < 6) {
+            targetMajor = 'ストラテジ';
+          } else if (nextStep < 10) {
+            targetMajor = 'マネジメント';
+          } else {
+            targetMajor = 'テクノロジ';
+          }
         }
       }
 
